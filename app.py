@@ -23,6 +23,18 @@ NAME = re.compile(r"^[a-z0-9][a-z0-9._-]{0,31}$")
 _here = os.path.dirname(__file__)
 INDEX = open(os.path.join(_here, "index.html"), "rb").read()
 LOGIN = open(os.path.join(_here, "login.html"), "rb").read()
+# The PWA (logo, icons, manifest, service worker): public, loaded once at start.
+_TYPES = {".svg": "image/svg+xml", ".png": "image/png", ".js": "text/javascript", ".webmanifest": "application/manifest+json"}
+STATIC = {}
+_static = os.path.join(_here, "static")
+for _f in (os.listdir(_static) if os.path.isdir(_static) else []):
+    _ext = os.path.splitext(_f)[1]
+    if _ext in _TYPES:
+        STATIC["/static/" + _f] = (open(os.path.join(_static, _f), "rb").read(), _TYPES[_ext])
+# The service worker lives at the root, so that it covers the whole site.
+for _alias, _f in (("/sw.js", "/static/sw.js"), ("/manifest.webmanifest", "/static/manifest.webmanifest")):
+    if _f in STATIC:
+        STATIC[_alias] = STATIC[_f]
 
 
 def sign(exp):
@@ -109,12 +121,12 @@ def agent_names():
 
 
 class H(BaseHTTPRequestHandler):
-    def _send(self, code, obj=None, body=None, ctype="application/json"):
+    def _send(self, code, obj=None, body=None, ctype="application/json", cache="no-store"):
         body = body if body is not None else json.dumps(obj, ensure_ascii=False).encode()
         self.send_response(code)
-        self.send_header("Content-Type", ctype + "; charset=utf-8")
+        self.send_header("Content-Type", ctype + ("" if ctype.startswith("image/png") else "; charset=utf-8"))
         self.send_header("Content-Length", str(len(body)))
-        self.send_header("Cache-Control", "no-store")
+        self.send_header("Cache-Control", cache)
         self.end_headers()
         self.wfile.write(body)
 
@@ -165,6 +177,11 @@ class H(BaseHTTPRequestHandler):
             return self._redirect("/", "ac_s=; Path=/; Max-Age=0; HttpOnly; Secure; SameSite=Strict")
         if u.path == "/health":
             return self._send(200, {"ok": True})
+        if u.path in STATIC:
+            body, ctype = STATIC[u.path]
+            # The service worker and the manifest are checked again at each visit; icons for a day.
+            fresh = u.path in ("/sw.js", "/manifest.webmanifest", "/static/sw.js", "/static/manifest.webmanifest")
+            return self._send(200, body=body, ctype=ctype, cache="no-cache" if fresh else "public, max-age=86400")
         who = self._auth()
         if not who:
             return

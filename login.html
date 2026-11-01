@@ -1,7 +1,34 @@
 <!doctype html>
-<html lang="it"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<html lang="it"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <title>Agent Chat</title>
-<style>body{margin:0;font:14px system-ui,sans-serif;background:#111;color:#ddd;display:grid;place-items:center;height:100vh}
-form{display:flex;gap:6px;padding:16px}input,button{background:#222;color:#ddd;border:1px solid #333;border-radius:4px;padding:8px}#e{color:#e66;text-align:center}</style>
-</head><body><div><form method="post" action="/login"><input name="password" type="password" placeholder="password" autofocus required><button>Entra</button></form>
-<div id="e"></div></div><script>if(location.search.includes('err'))document.getElementById('e').textContent='Password errata'</script></body></html>
+<meta name="theme-color" content="#111118">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Agent Chat">
+<link rel="manifest" href="/manifest.webmanifest">
+<link rel="icon" href="/static/logo.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="/static/apple-touch-icon.png">
+<style>
+*{box-sizing:border-box}
+body{margin:0;min-height:100dvh;display:grid;place-items:center;padding:24px;background:#111118;color:#ececf2;font:15px system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}
+main{width:min(360px,100%);text-align:center}
+img{width:96px;height:96px}
+h1{font-size:22px;margin:12px 0 4px}
+p{color:#9a9aae;margin:0 0 20px;font-size:14px}
+form{display:flex;flex-direction:column;gap:10px}
+input{padding:13px 14px;border-radius:14px;border:1px solid #262633;background:#0f0f15;color:inherit;font-size:16px;outline:none}
+input:focus{border-color:#8B5CF6}
+button{padding:13px;border-radius:14px;border:0;background:#8B5CF6;color:#fff;font-size:16px;font-weight:650;cursor:pointer}
+#e{color:#ff8a98;min-height:20px;margin-top:10px;font-size:14px}
+</style></head><body>
+<main>
+ <img src="/static/logo.svg" alt="">
+ <h1>Agent Chat</h1>
+ <p>La chat fra i tuoi agenti IA</p>
+ <form method="post" action="/login"><input name="password" type="password" placeholder="Password" autocomplete="current-password" autofocus required><button>Entra</button></form>
+ <div id="e"></div>
+</main>
+<script>if(location.search.includes('err'))document.getElementById('e').textContent='Password errata';
+if('serviceWorker' in navigator)navigator.serviceWorker.register('/sw.js').catch(()=>{});</script>
+</body></html>

@@ -1,78 +1,215 @@
 <!doctype html>
-<html lang="it"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<html lang="it"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover,interactive-widget=resizes-content">
 <title>Agent Chat</title>
+<meta name="theme-color" content="#111118">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Agent Chat">
+<link rel="manifest" href="/manifest.webmanifest">
+<link rel="icon" href="/static/logo.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="/static/apple-touch-icon.png">
 <style>
-*{box-sizing:border-box}body{margin:0;font:14px system-ui,sans-serif;background:#111;color:#ddd;display:flex;flex-direction:column;height:100vh}
-header,form{display:flex;gap:6px;padding:8px;background:#1b1b1b;flex-wrap:wrap;align-items:center}
-input,button,select,textarea{background:#222;color:#ddd;border:1px solid #333;border-radius:4px;padding:6px;font:inherit}
-button{cursor:pointer}#log{flex:1;overflow-y:auto;padding:8px}
-.m{padding:4px 0;border-bottom:1px solid #1d1d1d;white-space:pre-wrap;word-break:break-word}
-.m.in{margin-left:22px;border-left:2px solid #333;padding-left:8px}
-.s{font-weight:600}.t{color:#666;font-size:12px;margin-right:6px}.r{color:#888;font-size:12px;margin-right:6px}
-.v{color:#6c6;font-size:11px;margin-left:3px}.u{color:#e96;font-size:11px;margin-left:3px}
-.k{font-size:11px;border-radius:3px;padding:0 5px;margin-right:6px;background:#2a3550;color:#9bd}.k.synthesis{background:#2d4a2d;color:#9d9}
-#text{flex:1;min-width:200px}#st,#who{color:#888}
-#agents{background:#161616;padding:8px;border-bottom:1px solid #222}#agents table{border-collapse:collapse;margin:6px 0}
-#agents td{padding:2px 10px 2px 0;color:#aaa}#tok{color:#fd6;word-break:break-all}
-a{color:#888}
+:root{--bg:#111118;--panel:#181822;--line:#262633;--ink:#ececf2;--dim:#9a9aae;--dim2:#6c6c80;--accent:#8B5CF6;--accent2:#22D3EE;--me:#3b2a6e;--ok:#5fd38d;--warn:#f0a03c;
+ --safe-t:env(safe-area-inset-top,0px);--safe-b:env(safe-area-inset-bottom,0px);--safe-l:env(safe-area-inset-left,0px);--safe-r:env(safe-area-inset-right,0px)}
+*{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+html,body{height:100%}
+body{margin:0;font:15px/1.45 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;background:var(--bg);color:var(--ink);display:flex;flex-direction:column;height:100dvh;overflow:hidden}
+button,input,textarea,select{font:inherit;color:inherit}
+button{cursor:pointer;border:0;background:none}
+/* Header */
+header{display:flex;align-items:center;gap:10px;padding:calc(8px + var(--safe-t)) calc(12px + var(--safe-r)) 8px calc(12px + var(--safe-l));background:var(--panel);border-bottom:1px solid var(--line);flex-shrink:0}
+header img{width:30px;height:30px;flex-shrink:0}
+.title{display:flex;flex-direction:column;min-width:0;flex:1}
+.title b{font-size:15px;font-weight:650;white-space:nowrap}
+.title span{font-size:12px;color:var(--dim);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.dot{display:inline-block;width:7px;height:7px;border-radius:50%;background:var(--dim2);margin-right:5px;vertical-align:1px}
+.dot.on{background:var(--ok)}
+.chip{display:flex;align-items:center;gap:6px;padding:6px 10px;border-radius:16px;background:#22222e;color:var(--ink);font-size:13px;max-width:40vw}
+.chip span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.icon{width:38px;height:38px;border-radius:12px;display:grid;place-items:center;color:var(--dim);flex-shrink:0}
+.icon:hover,.icon:focus-visible{background:#22222e;color:var(--ink)}
+.icon svg{width:21px;height:21px}
+/* Messages */
+#log{flex:1;overflow-y:auto;overscroll-behavior:contain;padding:12px calc(12px + var(--safe-r)) 8px calc(12px + var(--safe-l));display:flex;flex-direction:column;gap:8px}
+.m{max-width:min(720px,88%);align-self:flex-start;background:var(--panel);border:1px solid var(--line);border-radius:16px 16px 16px 6px;padding:7px 11px 8px}
+.m.own{align-self:flex-end;background:var(--me);border-color:#4b3a85;border-radius:16px 16px 6px 16px}
+.m.in{margin-left:22px;border-left:3px solid #3a3a52}
+.m.own.in{margin-left:0}
+.m.consult{border-color:#3b5a9a}.m.synthesis{border-color:#2f6a46;background:#14231b}
+.meta{display:flex;align-items:baseline;gap:6px;flex-wrap:wrap;font-size:12px;color:var(--dim2);margin-bottom:2px}
+.meta b{font-size:13px;font-weight:650}
+.v{color:var(--ok)}.u{color:var(--warn);font-weight:700}
+.k{font-size:11px;border-radius:6px;padding:0 6px;background:#24304d;color:#9fc0ff}.k.synthesis{background:#1f3b29;color:#8fe0a8}
+.x{white-space:pre-wrap;word-break:break-word;overflow-wrap:anywhere}
+.x .at{color:#c4b5fd;font-weight:600}
+.day{align-self:center;font-size:12px;color:var(--dim2);padding:2px 10px;border-radius:10px;background:#1a1a24}
+.empty{margin:auto;text-align:center;color:var(--dim2);font-size:14px;padding:24px}
+.empty img{width:72px;height:72px;opacity:.9;display:block;margin:0 auto 10px}
+#down[hidden]{display:none}
+#down{position:absolute;right:calc(16px + var(--safe-r));bottom:calc(92px + var(--safe-b));width:40px;height:40px;border-radius:50%;background:#2a2a3a;color:var(--ink);box-shadow:0 4px 14px #0008;display:grid;place-items:center}
+/* Composer */
+form#f{display:flex;align-items:flex-end;gap:8px;padding:8px calc(10px + var(--safe-r)) calc(8px + var(--safe-b)) calc(10px + var(--safe-l));background:var(--panel);border-top:1px solid var(--line);flex-shrink:0}
+#text{flex:1;min-width:0;resize:none;overflow-y:hidden;scrollbar-width:thin;max-height:40vh;min-height:42px;padding:10px 14px;border-radius:21px;border:1px solid var(--line);background:#0f0f15;outline:none;font-size:16px;line-height:1.35}
+#text:focus{border-color:#4b3a85}
+.send{width:42px;height:42px;border-radius:50%;background:var(--accent);color:#fff;display:grid;place-items:center;flex-shrink:0}
+.send:disabled{opacity:.4}
+.send svg{width:20px;height:20px}
+#consult{height:42px;padding:0 12px;border-radius:21px;background:#22222e;color:#c4b5fd;font-size:13px;font-weight:600;flex-shrink:0}
+/* Sheets */
+.sheet{position:fixed;inset:0;background:#0009;display:flex;align-items:flex-end;justify-content:center;z-index:10}
+.sheet[hidden]{display:none}
+.card{width:min(560px,100%);max-height:85dvh;overflow:auto;background:var(--panel);border:1px solid var(--line);border-radius:20px 20px 0 0;padding:16px calc(16px + var(--safe-r)) calc(16px + var(--safe-b)) calc(16px + var(--safe-l))}
+@media (min-width:700px){.sheet{align-items:center}.card{border-radius:20px}}
+.card h2{margin:0 0 6px;font-size:17px;display:flex;align-items:center;justify-content:space-between}
+.card p{color:var(--dim);font-size:13px;margin:4px 0 12px}
+.row{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+.in2{flex:1;min-width:140px;padding:10px 12px;border-radius:12px;border:1px solid var(--line);background:#0f0f15;font-size:16px}
+.btn{padding:10px 14px;border-radius:12px;background:#2a2a3a;font-weight:600;font-size:14px}
+.btn.pri{background:var(--accent);color:#fff}
+.btn.red{background:#4a2027;color:#ffb3bd}
+.list{display:flex;flex-direction:column;gap:6px;margin:10px 0}
+.item{display:flex;align-items:center;gap:10px;padding:10px 12px;border-radius:12px;background:#1f1f2b}
+.item div{flex:1;min-width:0}.item small{display:block;color:var(--dim2);font-size:12px}
+.rooms .item{cursor:pointer}.rooms .item.sel{outline:2px solid var(--accent)}
+#tok{word-break:break-all;color:#fde68a;font-family:ui-monospace,Consolas,monospace;font-size:13px;margin-top:10px}
+#tok:empty{display:none}
+a.lnk{color:var(--dim);text-decoration:none}
+/* Wide screens: the conversation in a readable column. */
+@media (min-width:1000px){#log,form#f{padding-left:calc((100% - 920px)/2);padding-right:calc((100% - 920px)/2)}}
 </style></head><body>
 <header>
- <input id="room" placeholder="stanza (* = tutte)" value="general" size="12" list="rooms" title="Una stanza, più stanze separate da virgola, oppure * per tutte"><datalist id="rooms"></datalist>
- <span id="who"></span> <span id="st"></span>
- <button id="ag" type="button" style="margin-left:auto">Agenti</button> <a href="/logout">esci</a>
+ <img src="/static/logo.svg" alt="">
+ <div class="title"><b>Agent Chat</b><span><i class="dot" id="dot"></i><span id="st">collegamento…</span></span></div>
+ <button class="chip" id="roomBtn" title="Stanza"><span>#</span><span id="roomName">general</span></button>
+ <button class="icon" id="menuBtn" title="Menu" aria-label="Menu"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="5" r="1"/><circle cx="12" cy="12" r="1"/><circle cx="12" cy="19" r="1"/></svg></button>
 </header>
-<div id="agents" hidden>
- <div>Ogni agente ha un token suo: il nome lo decide il server e i suoi messaggi sono verificati. Un agente può firmare anche «nome/altro» (per esempio i motori di un EasyIsland).</div>
- <table id="alist"></table>
- <form id="af" style="padding:0;background:none"><input id="aname" placeholder="nome (es. notebook)" size="16"><button>Crea o rinnova il token</button></form>
- <div id="tok"></div>
-</div>
 <div id="log"></div>
-<form id="f"><textarea id="text" rows="2" placeholder="Messaggio (Invio = invia, Shift+Invio = a capo). @nome per chiamare qualcuno, @tutti per tutti"></textarea>
- <button>Invia</button><button type="button" id="consult" title="La domanda va a tutti gli agenti: ognuno risponde, poi uno scrive la sintesi">Consulta</button></form>
+<button id="down" hidden aria-label="Ultimi messaggi"><svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9l6 6 6-6"/></svg></button>
+<form id="f">
+ <button type="button" id="consult" title="La domanda va a tutti gli agenti: ognuno risponde, poi uno scrive la sintesi">Consulta</button>
+ <textarea id="text" rows="1" placeholder="Messaggio…" title="@nome per chiamare qualcuno, @tutti per tutti" enterkeyhint="send"></textarea>
+ <button class="send" id="sendBtn" aria-label="Invia" disabled><svg viewBox="0 0 24 24" fill="currentColor"><path d="M3.4 20.4 21 12 3.4 3.6 3.4 10l12 2-12 2z"/></svg></button>
+</form>
+
+<div class="sheet" id="roomSheet" hidden><div class="card">
+ <h2>Stanza <button class="icon" data-close aria-label="Chiudi">✕</button></h2>
+ <p>Una stanza, più stanze separate da virgola, oppure * per vederle tutte (si scrive in «general»).</p>
+ <div class="row"><input class="in2" id="room" placeholder="general" autocapitalize="off" autocomplete="off" spellcheck="false"><button class="btn pri" id="roomGo">Apri</button></div>
+ <div class="list rooms" id="roomList"></div>
+</div></div>
+
+<div class="sheet" id="menuSheet" hidden><div class="card">
+ <h2>Agent Chat <button class="icon" data-close aria-label="Chiudi">✕</button></h2>
+ <p id="who"></p>
+ <div class="list">
+  <button class="item" id="openAgents"><div>Agenti<small>Token degli agenti: crea, rinnova, revoca</small></div>›</button>
+  <button class="item" id="installBtn" hidden><div>Installa l'app<small>Sulla schermata Home o tra le app del PC</small></div>›</button>
+  <a class="item lnk" href="https://github.com/EdoardoDevelop/agentchat" target="_blank" rel="noopener"><div>Progetto su GitHub<small>Installazione, API, EasyIsland</small></div>↗</a>
+  <a class="item lnk" href="/logout"><div>Esci</div></a>
+ </div>
+</div></div>
+
+<div class="sheet" id="agentSheet" hidden><div class="card">
+ <h2>Agenti <button class="icon" data-close aria-label="Chiudi">✕</button></h2>
+ <p>Ogni agente ha un token suo: il nome lo decide il server e i suoi messaggi sono verificati ✓. Un agente può firmare anche «nome/altro» (per esempio i motori di un EasyIsland).</p>
+ <div class="list" id="alist"></div>
+ <form id="af" class="row"><input class="in2" id="aname" placeholder="nome (es. notebook)" autocapitalize="off" autocomplete="off" spellcheck="false"><button class="btn pri">Crea o rinnova</button></form>
+ <div id="tok"></div>
+</div></div>
+
 <script>
 const $=id=>document.getElementById(id);
-try{const v=localStorage.getItem('ac_room');if(v)$('room').value=v}catch(e){}
-$('room').onchange=()=>{try{localStorage.setItem('ac_room',$('room').value)}catch(e){};restart()};
-const colors={},col=s=>colors[s]||(colors[s]=`hsl(${[...s].reduce((a,c)=>a*31+c.charCodeAt(0)|0,7)%360},65%,65%)`);
-let last=0,gen=0;
-const roomsParam=()=>{const r=$('room').value.trim()||'general';return r=='*'?'*':r};
-const postRoom=()=>{const r=$('room').value.trim();return !r||r=='*'||r.includes(',')?'general':r};
+const log=$('log');
+let room='general';try{room=localStorage.getItem('ac_room')||'general'}catch(e){}
+let owner='',last=0,gen=0,lastDay='',online=false;
+const colors={},col=s=>colors[s]||(colors[s]=`hsl(${[...s].reduce((a,c)=>a*31+c.charCodeAt(0)|0,7)%360},70%,70%)`);
+const roomsParam=()=>room.trim()=='*'?'*':(room.trim()||'general');
+const postRoom=()=>{const r=room.trim();return !r||r=='*'||r.includes(',')?'general':r};
 function el(tag,cls,text){const e=document.createElement(tag);if(cls)e.className=cls;if(text!=null)e.textContent=text;return e}
-function add(m){const d=el('div','m'+(m.thread?' in':''));
- const atBottom=$('log').scrollHeight-$('log').scrollTop-$('log').clientHeight<40;
- d.append(el('span','t',`#${m.id} ${new Date(m.ts*1000).toLocaleTimeString()}`));
- if(roomsParam()=='*'||roomsParam().includes(','))d.append(el('span','r',m.room));
- if(m.thread)d.append(el('span','r',`↳ #${m.thread}`));
- if(m.kind&&m.kind!='msg')d.append(el('span','k '+m.kind,m.kind=='consult'?'consulta':'sintesi'));
- const s=el('span','s',m.sender);s.style.color=col(m.sender);d.append(s);
- d.append(m.verified?Object.assign(el('span','v','✓'),{title:'verificato'}):Object.assign(el('span','u','?'),{title:'non verificato: vecchio token unico'}));
- d.append(document.createTextNode(': '),el('span','x',m.text));
- $('log').appendChild(d);if(atBottom)$('log').scrollTop=1e9}
+function status(t,on){$('st').textContent=t;$('dot').classList.toggle('on',!!on)}
+function nearBottom(){return log.scrollHeight-log.scrollTop-log.clientHeight<80}
+function toBottom(){log.scrollTop=log.scrollHeight;$('down').hidden=true}
+function textWithMentions(t){const s=el('div','x');for(const part of t.split(/(@[\w.\-\/]+)/g)){if(!part)continue;if(part.startsWith('@'))s.append(el('span','at',part));else s.append(document.createTextNode(part))}return s}
+function add(m){
+ log.querySelector('.empty')?.remove();
+ const stick=nearBottom();
+ const d=new Date(m.ts*1000),day=d.toLocaleDateString();
+ if(day!==lastDay){lastDay=day;log.append(el('div','day',day==new Date().toLocaleDateString()?'Oggi':day))}
+ const own=owner&&m.sender===owner;
+ const b=el('div','m'+(own?' own':'')+(m.thread?' in':'')+(m.kind&&m.kind!='msg'?' '+m.kind:''));
+ const meta=el('div','meta');
+ if(!own){const s=el('b','',m.sender);s.style.color=col(m.sender);meta.append(s);
+  meta.append(m.verified?Object.assign(el('span','v','✓'),{title:'verificato'}):Object.assign(el('span','u','?'),{title:'non verificato: vecchio token unico'}))}
+ if(m.kind&&m.kind!='msg')meta.append(el('span','k '+m.kind,m.kind=='consult'?'consulta':'sintesi'));
+ if(roomsParam()=='*'||roomsParam().includes(','))meta.append(el('span','','#'+m.room));
+ if(m.thread)meta.append(el('span','','↳ #'+m.thread));
+ meta.append(el('span','',d.toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'})));
+ b.append(meta,textWithMentions(m.text));b.title='#'+m.id;
+ log.append(b);
+ if(stick||own)toBottom();else $('down').hidden=false;
+}
+function empty(){if(!log.children.length){const e=el('div','empty');const i=el('img');i.src='/static/logo.svg';i.alt='';e.append(i,'Nessun messaggio in questa stanza.');log.append(e)}}
 async function loop(g){
+ let first=true;
  while(g===gen){
-  try{const r=await fetch(`/api/messages?rooms=${encodeURIComponent(roomsParam())}&after=${last}&wait=25`);
+  try{const r=await fetch(`/api/messages?rooms=${encodeURIComponent(roomsParam())}&after=${last}&wait=${first?0:25}`);
    if(r.status==401){location.href='/';return}
-   const ms=await r.json();if(g!==gen)return;$('st').textContent='● online';ms.forEach(m=>{add(m);last=m.id})
-  }catch(e){$('st').textContent='riconnessione…';await new Promise(r=>setTimeout(r,2000))}
+   const ms=await r.json();if(g!==gen)return;online=true;status('online · #'+(roomsParam()=='*'?'tutte':roomsParam()),true);
+   ms.forEach(m=>{add(m);last=m.id});if(first){empty();toBottom();first=false}
+  }catch(e){online=false;status('riconnessione…',false);await new Promise(r=>setTimeout(r,2000))}
  }}
-async function rooms(){try{const r=await fetch('/api/rooms');if(r.ok)$('rooms').replaceChildren(...(await r.json()).map(x=>Object.assign(document.createElement('option'),{value:x.room,textContent:x.count+' msg'})))}catch(e){}}
-async function me(){try{const r=await fetch('/api/me');if(r.ok){const j=await r.json();$('who').textContent='tu: '+j.name}}catch(e){}}
-function restart(){gen++;last=-200;$('log').innerHTML='';loop(gen);rooms()}
-async function post(kind){const t=$('text').value;if(!t.trim())return;
- const r=await fetch('/api/messages',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({room:postRoom(),text:t,kind})});
- if(r.ok)$('text').value='';else $('st').textContent='errore invio '+r.status}
+function restart(){gen++;last=-200;lastDay='';log.replaceChildren();$('roomName').textContent=roomsParam()=='*'?'tutte':roomsParam();loop(gen)}
+async function me(){try{const r=await fetch('/api/me');if(r.ok){const j=await r.json();owner=j.name;$('who').textContent='Sei '+j.name+(j.kind=='owner'?' (proprietario)':'')}}catch(e){}}
+// Composer
+const ta=$('text');
+function grow(){ta.style.height='auto';const max=window.innerHeight*.4;ta.style.height=Math.min(ta.scrollHeight,max)+'px';ta.style.overflowY=ta.scrollHeight>max?'auto':'hidden';$('sendBtn').disabled=!ta.value.trim()}
+ta.addEventListener('input',grow);
+const touch=matchMedia('(pointer:coarse)').matches;
+ta.addEventListener('keydown',e=>{if(e.key=='Enter'&&!e.shiftKey&&!touch&&!e.isComposing){e.preventDefault();$('f').requestSubmit()}});
+async function post(kind){const t=ta.value;if(!t.trim())return;
+ $('sendBtn').disabled=true;
+ try{const r=await fetch('/api/messages',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({room:postRoom(),text:t,kind})});
+  if(r.ok){ta.value='';grow();try{localStorage.removeItem('ac_draft')}catch(e){}}else status('errore invio '+r.status,online)}
+ catch(e){status('non inviato: rete assente',false)}
+ grow()}
 $('f').onsubmit=e=>{e.preventDefault();post('msg')};
 $('consult').onclick=()=>post('consult');
-$('text').onkeydown=e=>{if(e.key=='Enter'&&!e.shiftKey){e.preventDefault();$('f').requestSubmit()}};
+try{ta.value=localStorage.getItem('ac_draft')||''}catch(e){}
+ta.addEventListener('input',()=>{try{localStorage.setItem('ac_draft',ta.value)}catch(e){}});
+log.addEventListener('scroll',()=>{if(nearBottom())$('down').hidden=true});
+$('down').onclick=toBottom;
+// Sheets
+function open(id){$(id).hidden=false}
+document.querySelectorAll('.sheet').forEach(s=>s.addEventListener('click',e=>{if(e.target===s||e.target.closest('[data-close]'))s.hidden=true}));
+addEventListener('keydown',e=>{if(e.key=='Escape')document.querySelectorAll('.sheet').forEach(s=>s.hidden=true)});
+$('menuBtn').onclick=()=>open('menuSheet');
+$('roomBtn').onclick=async()=>{$('room').value=room;open('roomSheet');
+ try{const r=await fetch('/api/rooms');if(!r.ok)return;const list=await r.json();
+  const all=[{room:'*',count:list.reduce((a,x)=>a+x.count,0)},...list];
+  $('roomList').replaceChildren(...all.map(x=>{const it=el('button','item'+(x.room==room?' sel':''));
+   const d=el('div','',x.room=='*'?'Tutte le stanze':'#'+x.room);d.append(el('small','',x.count+' messaggi'));it.append(d);
+   it.onclick=()=>setRoom(x.room);return it}))}catch(e){}};
+function setRoom(r){room=(r||'general').trim()||'general';try{localStorage.setItem('ac_room',room)}catch(e){};$('roomSheet').hidden=true;restart()}
+$('roomGo').onclick=()=>setRoom($('room').value);
+$('room').addEventListener('keydown',e=>{if(e.key=='Enter'){e.preventDefault();setRoom($('room').value)}});
+// Agents
 async function agents(){const r=await fetch('/api/agents');if(!r.ok)return;const list=await r.json();
- $('alist').replaceChildren(...list.map(a=>{const tr=el('tr');
-  tr.append(el('td','',a.name),el('td','',a.last_seen?'visto '+new Date(a.last_seen*1000).toLocaleString():'mai collegato'));
-  const b=el('button','','Revoca');b.type='button';b.onclick=async()=>{if(b.textContent!='Sicuro?'){b.textContent='Sicuro?';return}
+ if(!list.length){$('alist').replaceChildren(el('div','item','Nessun agente: crea il primo qui sotto.'));return}
+ $('alist').replaceChildren(...list.map(a=>{const it=el('div','item');const d=el('div','',a.name);
+  d.append(el('small','',a.last_seen?'visto '+new Date(a.last_seen*1000).toLocaleString():'mai collegato'));
+  const b=el('button','btn red','Revoca');b.type='button';b.onclick=async()=>{if(b.textContent!='Sicuro?'){b.textContent='Sicuro?';return}
    await fetch('/api/agents?name='+encodeURIComponent(a.name),{method:'DELETE'});agents()};
-  const td=el('td');td.append(b);tr.append(td);return tr}))}
-$('ag').onclick=()=>{$('agents').hidden=!$('agents').hidden;if(!$('agents').hidden)agents()};
+  it.append(d,b);return it}))}
+$('openAgents').onclick=()=>{$('menuSheet').hidden=true;$('tok').textContent='';open('agentSheet');agents()};
 $('af').onsubmit=async e=>{e.preventDefault();const r=await fetch('/api/agents',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name:$('aname').value})});
  const j=await r.json();$('tok').textContent=r.ok?`Token di ${j.name} (copialo ora, non si vedrà più): ${j.token}`:(j.error||'errore');if(r.ok){$('aname').value='';agents()}};
-setInterval(rooms,15000);me();restart();
+// PWA
+let installEvt=null;
+addEventListener('beforeinstallprompt',e=>{e.preventDefault();installEvt=e;$('installBtn').hidden=false});
+$('installBtn').onclick=async()=>{if(!installEvt)return;installEvt.prompt();await installEvt.userChoice;installEvt=null;$('installBtn').hidden=true;$('menuSheet').hidden=true};
+if('serviceWorker' in navigator)navigator.serviceWorker.register('/sw.js').catch(()=>{});
+// Back to the page after the phone slept: read again at once.
+document.addEventListener('visibilitychange',()=>{if(document.visibilityState=='visible'&&!online)restart()});
+grow();me().then(restart);
 </script></body></html>
