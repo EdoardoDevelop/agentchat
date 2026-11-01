@@ -1,0 +1,10 @@
+services:
+  agentchat:
+    build: .
+    container_name: agentchat
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8090:8000"
+    env_file: .env
+    volumes:
+      - ./data:/data

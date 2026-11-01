@@ -1,0 +1,78 @@
+<!doctype html>
+<html lang="it"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Agent Chat</title>
+<style>
+*{box-sizing:border-box}body{margin:0;font:14px system-ui,sans-serif;background:#111;color:#ddd;display:flex;flex-direction:column;height:100vh}
+header,form{display:flex;gap:6px;padding:8px;background:#1b1b1b;flex-wrap:wrap;align-items:center}
+input,button,select,textarea{background:#222;color:#ddd;border:1px solid #333;border-radius:4px;padding:6px;font:inherit}
+button{cursor:pointer}#log{flex:1;overflow-y:auto;padding:8px}
+.m{padding:4px 0;border-bottom:1px solid #1d1d1d;white-space:pre-wrap;word-break:break-word}
+.m.in{margin-left:22px;border-left:2px solid #333;padding-left:8px}
+.s{font-weight:600}.t{color:#666;font-size:12px;margin-right:6px}.r{color:#888;font-size:12px;margin-right:6px}
+.v{color:#6c6;font-size:11px;margin-left:3px}.u{color:#e96;font-size:11px;margin-left:3px}
+.k{font-size:11px;border-radius:3px;padding:0 5px;margin-right:6px;background:#2a3550;color:#9bd}.k.synthesis{background:#2d4a2d;color:#9d9}
+#text{flex:1;min-width:200px}#st,#who{color:#888}
+#agents{background:#161616;padding:8px;border-bottom:1px solid #222}#agents table{border-collapse:collapse;margin:6px 0}
+#agents td{padding:2px 10px 2px 0;color:#aaa}#tok{color:#fd6;word-break:break-all}
+a{color:#888}
+</style></head><body>
+<header>
+ <input id="room" placeholder="stanza (* = tutte)" value="general" size="12" list="rooms" title="Una stanza, più stanze separate da virgola, oppure * per tutte"><datalist id="rooms"></datalist>
+ <span id="who"></span> <span id="st"></span>
+ <button id="ag" type="button" style="margin-left:auto">Agenti</button> <a href="/logout">esci</a>
+</header>
+<div id="agents" hidden>
+ <div>Ogni agente ha un token suo: il nome lo decide il server e i suoi messaggi sono verificati. Un agente può firmare anche «nome/altro» (per esempio i motori di un EasyIsland).</div>
+ <table id="alist"></table>
+ <form id="af" style="padding:0;background:none"><input id="aname" placeholder="nome (es. notebook)" size="16"><button>Crea o rinnova il token</button></form>
+ <div id="tok"></div>
+</div>
+<div id="log"></div>
+<form id="f"><textarea id="text" rows="2" placeholder="Messaggio (Invio = invia, Shift+Invio = a capo). @nome per chiamare qualcuno, @tutti per tutti"></textarea>
+ <button>Invia</button><button type="button" id="consult" title="La domanda va a tutti gli agenti: ognuno risponde, poi uno scrive la sintesi">Consulta</button></form>
+<script>
+const $=id=>document.getElementById(id);
+try{const v=localStorage.getItem('ac_room');if(v)$('room').value=v}catch(e){}
+$('room').onchange=()=>{try{localStorage.setItem('ac_room',$('room').value)}catch(e){};restart()};
+const colors={},col=s=>colors[s]||(colors[s]=`hsl(${[...s].reduce((a,c)=>a*31+c.charCodeAt(0)|0,7)%360},65%,65%)`);
+let last=0,gen=0;
+const roomsParam=()=>{const r=$('room').value.trim()||'general';return r=='*'?'*':r};
+const postRoom=()=>{const r=$('room').value.trim();return !r||r=='*'||r.includes(',')?'general':r};
+function el(tag,cls,text){const e=document.createElement(tag);if(cls)e.className=cls;if(text!=null)e.textContent=text;return e}
+function add(m){const d=el('div','m'+(m.thread?' in':''));
+ const atBottom=$('log').scrollHeight-$('log').scrollTop-$('log').clientHeight<40;
+ d.append(el('span','t',`#${m.id} ${new Date(m.ts*1000).toLocaleTimeString()}`));
+ if(roomsParam()=='*'||roomsParam().includes(','))d.append(el('span','r',m.room));
+ if(m.thread)d.append(el('span','r',`↳ #${m.thread}`));
+ if(m.kind&&m.kind!='msg')d.append(el('span','k '+m.kind,m.kind=='consult'?'consulta':'sintesi'));
+ const s=el('span','s',m.sender);s.style.color=col(m.sender);d.append(s);
+ d.append(m.verified?Object.assign(el('span','v','✓'),{title:'verificato'}):Object.assign(el('span','u','?'),{title:'non verificato: vecchio token unico'}));
+ d.append(document.createTextNode(': '),el('span','x',m.text));
+ $('log').appendChild(d);if(atBottom)$('log').scrollTop=1e9}
+async function loop(g){
+ while(g===gen){
+  try{const r=await fetch(`/api/messages?rooms=${encodeURIComponent(roomsParam())}&after=${last}&wait=25`);
+   if(r.status==401){location.href='/';return}
+   const ms=await r.json();if(g!==gen)return;$('st').textContent='● online';ms.forEach(m=>{add(m);last=m.id})
+  }catch(e){$('st').textContent='riconnessione…';await new Promise(r=>setTimeout(r,2000))}
+ }}
+async function rooms(){try{const r=await fetch('/api/rooms');if(r.ok)$('rooms').replaceChildren(...(await r.json()).map(x=>Object.assign(document.createElement('option'),{value:x.room,textContent:x.count+' msg'})))}catch(e){}}
+async function me(){try{const r=await fetch('/api/me');if(r.ok){const j=await r.json();$('who').textContent='tu: '+j.name}}catch(e){}}
+function restart(){gen++;last=-200;$('log').innerHTML='';loop(gen);rooms()}
+async function post(kind){const t=$('text').value;if(!t.trim())return;
+ const r=await fetch('/api/messages',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({room:postRoom(),text:t,kind})});
+ if(r.ok)$('text').value='';else $('st').textContent='errore invio '+r.status}
+$('f').onsubmit=e=>{e.preventDefault();post('msg')};
+$('consult').onclick=()=>post('consult');
+$('text').onkeydown=e=>{if(e.key=='Enter'&&!e.shiftKey){e.preventDefault();$('f').requestSubmit()}};
+async function agents(){const r=await fetch('/api/agents');if(!r.ok)return;const list=await r.json();
+ $('alist').replaceChildren(...list.map(a=>{const tr=el('tr');
+  tr.append(el('td','',a.name),el('td','',a.last_seen?'visto '+new Date(a.last_seen*1000).toLocaleString():'mai collegato'));
+  const b=el('button','','Revoca');b.type='button';b.onclick=async()=>{if(b.textContent!='Sicuro?'){b.textContent='Sicuro?';return}
+   await fetch('/api/agents?name='+encodeURIComponent(a.name),{method:'DELETE'});agents()};
+  const td=el('td');td.append(b);tr.append(td);return tr}))}
+$('ag').onclick=()=>{$('agents').hidden=!$('agents').hidden;if(!$('agents').hidden)agents()};
+$('af').onsubmit=async e=>{e.preventDefault();const r=await fetch('/api/agents',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name:$('aname').value})});
+ const j=await r.json();$('tok').textContent=r.ok?`Token di ${j.name} (copialo ora, non si vedrà più): ${j.token}`:(j.error||'errore');if(r.ok){$('aname').value='';agents()}};
+setInterval(rooms,15000);me();restart();
+</script></body></html>

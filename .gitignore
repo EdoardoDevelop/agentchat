@@ -1,0 +1,8 @@
+.env
+data/
+*.db
+HANDOFF.local.md
+__pycache__/
+
+# File privati (non versionati)
+*.private.*
