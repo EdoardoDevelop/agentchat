@@ -57,6 +57,30 @@ form#f{display:flex;align-items:flex-end;gap:8px;padding:8px calc(10px + var(--s
 .send{width:42px;height:42px;border-radius:50%;background:var(--accent);color:#fff;display:grid;place-items:center;flex-shrink:0}
 .send:disabled{opacity:.4}
 .send svg{width:20px;height:20px}
+/* Attachments */
+#att{display:flex;flex-wrap:wrap;gap:6px;padding:8px calc(10px + var(--safe-r)) 0 calc(10px + var(--safe-l));background:var(--panel);border-top:1px solid var(--line);flex-shrink:0}
+#att:empty{display:none}
+#att:not(:empty)+form#f{border-top:0}
+.pend{display:flex;align-items:center;gap:6px;max-width:100%;padding:5px 6px 5px 10px;border-radius:12px;background:#22222e;font-size:13px}
+.pend span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:46vw}
+.pend small{color:var(--dim2)}
+.pend button{width:24px;height:24px;border-radius:8px;color:var(--dim)}
+.pend.busy{opacity:.6}.pend.bad{background:#4a2027;color:#ffb3bd}
+.clip{width:42px;height:42px;border-radius:50%;display:grid;place-items:center;color:var(--dim);flex-shrink:0}
+.clip:hover{background:#22222e;color:var(--ink)}
+.clip svg{width:21px;height:21px}
+.files{display:flex;flex-direction:column;gap:6px;margin-top:6px}
+.file{display:flex;align-items:center;gap:10px;padding:8px 10px;border-radius:12px;background:#0f0f15;border:1px solid var(--line);text-decoration:none;color:inherit;min-width:0}
+.m.own .file{background:#2c2058;border-color:#4b3a85}
+.file .ic{width:34px;height:34px;border-radius:9px;display:grid;place-items:center;background:#2a2a3a;font-size:16px;flex-shrink:0}
+.file div{min-width:0;flex:1}
+.file b{display:block;font-size:13px;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.file small,.cap{display:block;font-size:11.5px;color:var(--dim2);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.sha{font-family:ui-monospace,Consolas,monospace;cursor:copy}
+.imp{color:var(--ok)}.wait{color:var(--warn)}
+.pic{display:block;max-width:min(280px,100%);max-height:280px;border-radius:12px;border:1px solid var(--line)}
+#drop{position:fixed;inset:0;background:#8b5cf633;border:3px dashed var(--accent);display:grid;place-items:center;font-size:18px;font-weight:600;z-index:20;pointer-events:none}
+#drop[hidden]{display:none}
 #consult{height:42px;padding:0 12px;border-radius:21px;background:#22222e;color:#c4b5fd;font-size:13px;font-weight:600;flex-shrink:0}
 /* Sheets */
 .sheet{position:fixed;inset:0;background:#0009;display:flex;align-items:flex-end;justify-content:center;z-index:10}
@@ -88,7 +112,11 @@ a.lnk{color:var(--dim);text-decoration:none}
 </header>
 <div id="log"></div>
 <button id="down" hidden aria-label="Ultimi messaggi"><svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9l6 6 6-6"/></svg></button>
+<div id="att"></div>
+<div id="drop" hidden>Rilascia per allegare</div>
 <form id="f">
+ <button type="button" class="clip" id="clipBtn" aria-label="Allega file" title="Allega file (anche incollando o trascinando)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 11.5 12.6 19.9a5.5 5.5 0 0 1-7.8-7.8l8.5-8.5a3.7 3.7 0 0 1 5.2 5.2l-8.5 8.5a1.8 1.8 0 0 1-2.6-2.6l7.8-7.8"/></svg></button>
+ <input type="file" id="fileIn" multiple hidden>
  <button type="button" id="consult" title="La domanda va a tutti gli agenti: ognuno risponde, poi uno scrive la sintesi">Consulta</button>
  <textarea id="text" rows="1" placeholder="Messaggio…" title="@nome per chiamare qualcuno, @tutti per tutti" enterkeyhint="send"></textarea>
  <button class="send" id="sendBtn" aria-label="Invia" disabled><svg viewBox="0 0 24 24" fill="currentColor"><path d="M3.4 20.4 21 12 3.4 3.6 3.4 10l12 2-12 2z"/></svg></button>
@@ -147,7 +175,8 @@ function add(m){
  if(roomsParam()=='*'||roomsParam().includes(','))meta.append(el('span','','#'+m.room));
  if(m.thread)meta.append(el('span','','↳ #'+m.thread));
  meta.append(el('span','',d.toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'})));
- b.append(meta,textWithMentions(m.text));b.title='#'+m.id;
+ b.append(meta);if(m.text&&m.text.trim())b.append(textWithMentions(m.text));
+ if(m.files&&m.files.length)b.append(filesOf(m.files));b.title='#'+m.id;
  log.append(b);
  if(stick||own)toBottom();else $('down').hidden=false;
 }
@@ -165,14 +194,53 @@ function restart(){gen++;last=-200;lastDay='';log.replaceChildren();$('roomName'
 async function me(){try{const r=await fetch('/api/me');if(r.ok){const j=await r.json();owner=j.name;$('who').textContent='Sei '+j.name+(j.kind=='owner'?' (proprietario)':'')}}catch(e){}}
 // Composer
 const ta=$('text');
-function grow(){ta.style.height='auto';const max=window.innerHeight*.4;ta.style.height=Math.min(ta.scrollHeight,max)+'px';ta.style.overflowY=ta.scrollHeight>max?'auto':'hidden';$('sendBtn').disabled=!ta.value.trim()}
+function grow(){ta.style.height='auto';const max=window.innerHeight*.4;ta.style.height=Math.min(ta.scrollHeight,max)+'px';ta.style.overflowY=ta.scrollHeight>max?'auto':'hidden';
+ $('sendBtn').disabled=uploading()||(!ta.value.trim()&&!pending.some(p=>p.id))}
+// ── Attachments: name, size and SHA-256 by each file; one agent imports it. ──
+const pending=[];
+const uploading=()=>pending.some(p=>!p.id&&!p.err);
+function size(n){return n<1024?n+' B':n<1048576?(n/1024).toFixed(n<10240?1:0)+' KB':(n/1048576).toFixed(1)+' MB'}
+function shortSha(h){return h?h.slice(0,8)+'…'+h.slice(-6):''}
+function iconOf(t,name){t=t||'';const e=(name.split('.').pop()||'').toLowerCase();
+ return t.startsWith('image/')?'🖼':t=='application/pdf'||e=='pdf'?'📕':/^(zip|7z|rar|tar|gz)$/.test(e)?'🗜':/^(xlsx?|csv|ods)$/.test(e)?'📊':/^(docx?|odt|rtf)$/.test(e)?'📝':/^(txt|md|log|json|xml|ya?ml|ps1|sh|py|js|ts)$/.test(e)?'📄':'📎'}
+function shaEl(h){const s=el('span','sha','SHA-256 '+shortSha(h));s.title='SHA-256 '+h+' (clic: copia)';
+ s.onclick=e=>{e.preventDefault();e.stopPropagation();navigator.clipboard?.writeText(h).then(()=>{s.textContent='copiato';setTimeout(()=>s.textContent='SHA-256 '+shortSha(h),1200)}).catch(()=>{})};return s}
+function filesOf(list){const box=el('div','files');
+ for(const f of list){const url='/api/files/'+encodeURIComponent(f.id);
+  const who=f.imported_by?Object.assign(el('span','imp','importato da '+f.imported_by),{}):el('span','wait','da importare');
+  if((f.type||'').startsWith('image/')&&f.type!='image/svg+xml'){const a=el('a');a.href=url;a.target='_blank';a.rel='noopener';
+   const i=el('img','pic');i.src=url;i.alt=f.name;i.loading='lazy';a.append(i);
+   const cap=el('span','cap');cap.append(f.name+' · '+size(f.size)+' · ',shaEl(f.sha256||''));const st=el('span','cap');st.append(who);box.append(a,cap,st)}
+  else{const a=el('a','file');a.href=url;a.download=f.name;a.append(el('span','ic',iconOf(f.type,f.name)));
+   const d=el('div');d.append(el('b','',f.name));const sm=el('small');sm.append(size(f.size)+' · ',shaEl(f.sha256||''));const st=el('small');st.append(who);d.append(sm,st);a.append(d);box.append(a)}}
+ return box}
+function drawPending(){$('att').replaceChildren(...pending.map(p=>{const c=el('div','pend'+(p.err?' bad':!p.id?' busy':''));
+  c.append(el('span','',iconOf(p.type,p.name)+' '+p.name),el('small','',p.err?p.err:!p.id?'caricamento…':size(p.size)+' · '+shortSha(p.sha256)));
+  const x=el('button','','✕');x.type='button';x.title='Togli';x.onclick=()=>{pending.splice(pending.indexOf(p),1);drawPending();grow()};c.append(x);return c}));grow()}
+async function attach(files){for(const f of files){if(pending.length>=10)break;
+  const p={name:f.name||'immagine.png',size:f.size,type:f.type};pending.push(p);
+  if(f.size>20*1048576){p.err='troppo grande (max 20 MB)';drawPending();continue}
+  drawPending();
+  try{const r=await fetch('/api/files',{method:'POST',headers:{'Content-Type':f.type||'application/octet-stream','X-File-Name':encodeURIComponent(p.name)},body:f});
+   const j=await r.json();if(r.ok)Object.assign(p,j);else p.err=j.error||('errore '+r.status)}catch(e){p.err='rete assente'}
+  drawPending()}}
+$('clipBtn').onclick=()=>$('fileIn').click();
+$('fileIn').onchange=()=>{attach([...$('fileIn').files]);$('fileIn').value=''};
+ta.addEventListener('paste',e=>{const fs=[...(e.clipboardData?.files||[])];if(fs.length){e.preventDefault();attach(fs)}});
+let dragN=0;
+addEventListener('dragenter',e=>{if([...(e.dataTransfer?.types||[])].includes('Files')){dragN++;$('drop').hidden=false}});
+addEventListener('dragleave',()=>{if(--dragN<=0){dragN=0;$('drop').hidden=true}});
+addEventListener('dragover',e=>{if([...(e.dataTransfer?.types||[])].includes('Files'))e.preventDefault()});
+addEventListener('drop',e=>{dragN=0;$('drop').hidden=true;const fs=[...(e.dataTransfer?.files||[])];if(fs.length){e.preventDefault();attach(fs)}});
 ta.addEventListener('input',grow);
 const touch=matchMedia('(pointer:coarse)').matches;
 ta.addEventListener('keydown',e=>{if(e.key=='Enter'&&!e.shiftKey&&!touch&&!e.isComposing){e.preventDefault();$('f').requestSubmit()}});
-async function post(kind){const t=ta.value;if(!t.trim())return;
+async function post(kind){const t=ta.value;const files=pending.filter(p=>p.id).map(p=>p.id);
+ if(uploading()||(!t.trim()&&!files.length))return;
  $('sendBtn').disabled=true;
- try{const r=await fetch('/api/messages',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({room:postRoom(),text:t,kind})});
-  if(r.ok){ta.value='';grow();try{localStorage.removeItem('ac_draft')}catch(e){}}else status('errore invio '+r.status,online)}
+ try{const r=await fetch('/api/messages',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({room:postRoom(),text:t,kind,files})});
+  if(r.ok){ta.value='';pending.length=0;drawPending();try{localStorage.removeItem('ac_draft')}catch(e){}}
+  else{let why='';try{why=(await r.json()).error||''}catch(e){};status('errore invio '+r.status+(why?': '+why:''),online)}}
  catch(e){status('non inviato: rete assente',false)}
  grow()}
 $('f').onsubmit=e=>{e.preventDefault();post('msg')};

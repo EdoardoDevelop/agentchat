@@ -9,6 +9,7 @@ Chi scrive:
   passati al token personale): il nome è dichiarato, il messaggio è «non verificato».
 """
 import hashlib, hmac, json, os, re, secrets, sqlite3, threading, time
+from urllib.parse import quote, unquote
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from urllib.parse import urlparse, parse_qs
 
@@ -19,6 +20,12 @@ SECRET = hashlib.sha256((os.environ.get("CHAT_SECRET", "") + LEGACY + PASSWORD).
 SESSION_DAYS = 30
 DB = os.environ.get("CHAT_DB", "/data/chat.db")
 KINDS = ("msg", "consult", "synthesis")
+# Attachments: files next to the database, at most CHAT_MAX_FILE_MB each (20 MB),
+# 10 per message. Shown in the page only when they are harmless (pictures, PDF, text).
+FILES = os.path.join(os.path.dirname(os.path.abspath(DB)), "files")
+MAX_FILE = int(os.environ.get("CHAT_MAX_FILE_MB", "20")) * 1024 * 1024
+INLINE = {"image/png", "image/jpeg", "image/gif", "image/webp", "application/pdf", "text/plain"}
+FILE_ID = re.compile(r"^[A-Za-z0-9_-]{16,40}$")
 NAME = re.compile(r"^[a-z0-9][a-z0-9._-]{0,31}$")
 _here = os.path.dirname(__file__)
 INDEX = open(os.path.join(_here, "index.html"), "rb").read()
@@ -67,6 +74,16 @@ if "thread" not in cols:
     db.execute("ALTER TABLE messages ADD COLUMN thread INTEGER")
 if "kind" not in cols:
     db.execute("ALTER TABLE messages ADD COLUMN kind TEXT NOT NULL DEFAULT 'msg'")
+if "files" not in cols:
+    db.execute("ALTER TABLE messages ADD COLUMN files TEXT")
+db.execute("""CREATE TABLE IF NOT EXISTS files(
+  id TEXT PRIMARY KEY, name TEXT NOT NULL, type TEXT NOT NULL, size INTEGER NOT NULL,
+  sender TEXT NOT NULL, ts REAL NOT NULL, message INTEGER)""")
+fcols = {r[1] for r in db.execute("PRAGMA table_info(files)")}
+for col, kind in (("sha256", "TEXT"), ("imported_by", "TEXT"), ("imported_at", "REAL")):
+    if col not in fcols:
+        db.execute(f"ALTER TABLE files ADD COLUMN {col} {kind}")
+os.makedirs(FILES, exist_ok=True)
 db.execute("CREATE INDEX IF NOT EXISTS ix_room ON messages(room, id)")
 db.execute("CREATE INDEX IF NOT EXISTS ix_thread ON messages(thread, id)")
 db.execute("""CREATE TABLE IF NOT EXISTS agents(
@@ -74,7 +91,7 @@ db.execute("""CREATE TABLE IF NOT EXISTS agents(
 db.commit()
 lock = threading.Lock()
 cond = threading.Condition(lock)
-FIELDS = ("id", "room", "sender", "text", "ts", "verified", "thread", "kind")
+FIELDS = ("id", "room", "sender", "text", "ts", "verified", "thread", "kind", "files")
 
 
 def rows_to_msgs(rows):
@@ -82,12 +99,23 @@ def rows_to_msgs(rows):
     for r in rows:
         m = dict(zip(FIELDS, r))
         m["verified"] = bool(m["verified"])
+        try:
+            m["files"] = json.loads(m["files"]) if m["files"] else []
+        except ValueError:
+            m["files"] = []
         out.append(m)
+    # Who imported each attachment, as it is now.
+    ids = [f["id"] for m in out for f in m["files"] if isinstance(f, dict) and "id" in f]
+    if ids:
+        got = dict(db.execute("SELECT id, imported_by FROM files WHERE id IN (%s)" % ",".join("?" * len(ids)), ids).fetchall())
+        for m in out:
+            for f in m["files"]:
+                f["imported_by"] = got.get(f.get("id"))
     return out
 
 
 def fetch(rooms, after, limit, thread=None):
-    sql = "SELECT id, room, sender, text, ts, verified, thread, kind FROM messages WHERE id>?"
+    sql = "SELECT id, room, sender, text, ts, verified, thread, kind, files FROM messages WHERE id>?"
     args = [after]
     if thread is not None:
         sql += " AND (id=? OR thread=?)"
@@ -210,6 +238,8 @@ class H(BaseHTTPRequestHandler):
             with lock:
                 rows = db.execute("SELECT room, COUNT(*), MAX(id) FROM messages GROUP BY room").fetchall()
             return self._send(200, [{"room": r, "count": c, "last_id": m} for r, c, m in rows])
+        if u.path.startswith("/api/files/"):
+            return self._get_file(u.path[len("/api/files/"):])
         if u.path == "/api/agents":
             if who["kind"] != "owner":
                 return self._send(403, {"error": "solo dalla pagina web"})
@@ -248,6 +278,13 @@ class H(BaseHTTPRequestHandler):
             return
         if u.path == "/api/agents":
             return self._new_agent(who)
+        if u.path == "/api/files":
+            return self._new_file(who)
+        if u.path.startswith("/api/files/") and u.path.endswith("/import"):
+            fid = u.path[len("/api/files/"):-len("/import")]
+            if not FILE_ID.match(fid):
+                return self._send(404, {"error": "not found"})
+            return self._import_file(who, fid)
         if u.path != "/api/messages":
             return self._send(404, {"error": "not found"})
         try:
@@ -257,9 +294,11 @@ class H(BaseHTTPRequestHandler):
             kind = str(d.get("kind") or "msg")
             thread = d.get("thread")
             thread = int(thread) if thread not in (None, "") else None
-            assert text.strip() and room and kind in KINDS
+            file_ids = [str(f) for f in (d.get("files") or [])][:10]
+            assert (text.strip() or file_ids) and room and kind in KINDS
+            assert all(FILE_ID.match(f) for f in file_ids)
         except Exception:
-            return self._send(400, {"error": "body JSON richiesto: {text, room?, sender?, thread?, kind?}"})
+            return self._send(400, {"error": "body JSON richiesto: {text, room?, sender?, thread?, kind?, files?}"})
         declared = str(d.get("sender") or "").strip().lower()[:64]
         if who["kind"] == "owner":
             sender, verified = OWNER, 1
@@ -279,14 +318,90 @@ class H(BaseHTTPRequestHandler):
         with cond:
             if thread is not None and not db.execute("SELECT 1 FROM messages WHERE id=?", (thread,)).fetchone():
                 return self._send(400, {"error": "thread inesistente"})
+            # Only one's own uploads, not yet in a message.
+            files = []
+            for f in file_ids:
+                row = db.execute("SELECT id, name, type, size, sha256 FROM files WHERE id=? AND sender=? AND message IS NULL",
+                                 (f, sender.split("/")[0])).fetchone()
+                if not row:
+                    return self._send(400, {"error": "allegato inesistente o già usato"})
+                files.append(dict(zip(("id", "name", "type", "size", "sha256"), row)))
             ts = time.time()
             cur = db.execute(
-                "INSERT INTO messages(room, sender, text, ts, verified, thread, kind) VALUES(?,?,?,?,?,?,?)",
-                (room, sender, text, ts, verified, thread, kind))
+                "INSERT INTO messages(room, sender, text, ts, verified, thread, kind, files) VALUES(?,?,?,?,?,?,?,?)",
+                (room, sender, text, ts, verified, thread, kind, json.dumps(files) if files else None))
+            for f in files:
+                db.execute("UPDATE files SET message=? WHERE id=?", (cur.lastrowid, f["id"]))
             db.commit()
             cond.notify_all()
         self._send(201, {"id": cur.lastrowid, "room": room, "sender": sender, "text": text, "ts": ts,
-                         "verified": bool(verified), "thread": thread, "kind": kind})
+                         "verified": bool(verified), "thread": thread, "kind": kind, "files": files})
+
+    def _new_file(self, who):
+        """Un allegato: il corpo è il file, il nome in X-File-Name (codificato come URL)."""
+        if who["kind"] == "legacy":
+            return self._send(403, {"error": "allegati solo con un token personale"})
+        n = int(self.headers.get("Content-Length", 0) or 0)
+        if n <= 0:
+            return self._send(400, {"error": "file vuoto"})
+        if n > MAX_FILE:
+            return self._send(413, {"error": f"file troppo grande (massimo {MAX_FILE // 1024 // 1024} MB)"})
+        name = os.path.basename(unquote(self.headers.get("X-File-Name", "") or "file").replace("\\", "/")).strip()[:120] or "file"
+        name = "".join(c for c in name if c.isprintable()) or "file"
+        ctype = (self.headers.get("Content-Type") or "application/octet-stream").split(";")[0].strip().lower()[:100]
+        data = self.rfile.read(n)
+        if len(data) != n:
+            return self._send(400, {"error": "file arrivato a metà"})
+        digest = hashlib.sha256(data).hexdigest()
+        fid = secrets.token_urlsafe(18)
+        with open(os.path.join(FILES, fid), "wb") as fh:
+            fh.write(data)
+        with lock:
+            db.execute("INSERT INTO files(id, name, type, size, sender, ts, sha256) VALUES(?,?,?,?,?,?,?)",
+                       (fid, name, ctype, len(data), OWNER if who["kind"] == "owner" else who["name"], time.time(), digest))
+            db.commit()
+        self._send(201, {"id": fid, "name": name, "type": ctype, "size": len(data), "sha256": digest})
+
+    def _import_file(self, who, fid):
+        """Un solo agente importa ogni allegato: il primo che lo chiede; gli altri ricevono 409 e chi l'ha preso."""
+        if who["kind"] != "agent":
+            return self._send(403, {"error": "solo un agente con il suo token importa un allegato"})
+        try:
+            declared = str(self._body().get("sender") or "").strip().lower()[:64]
+        except Exception:
+            declared = ""
+        base = who["name"]
+        by = declared if declared.startswith(base + "/") and NAME.match(declared[len(base) + 1:]) else base
+        with lock:
+            row = db.execute("SELECT imported_by, name, size, sha256 FROM files WHERE id=?", (fid,)).fetchone()
+            if not row:
+                return self._send(404, {"error": "not found"})
+            if row[0] and row[0] != by:
+                return self._send(409, {"error": f"già importato da {row[0]}", "imported_by": row[0]})
+            db.execute("UPDATE files SET imported_by=?, imported_at=? WHERE id=?", (by, time.time(), fid))
+            db.commit()
+        self._send(200, {"id": fid, "imported_by": by, "name": row[1], "size": row[2], "sha256": row[3]})
+
+    def _get_file(self, fid):
+        if not FILE_ID.match(fid):
+            return self._send(404, {"error": "not found"})
+        with lock:
+            row = db.execute("SELECT name, type FROM files WHERE id=?", (fid,)).fetchone()
+        path = os.path.join(FILES, fid)
+        if not row or not os.path.isfile(path):
+            return self._send(404, {"error": "not found"})
+        name, ctype = row
+        inline = ctype in INLINE
+        body = open(path, "rb").read()
+        self.send_response(200)
+        self.send_header("Content-Type", ctype if inline else "application/octet-stream")
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Content-Disposition", f"{'inline' if inline else 'attachment'}; filename*=UTF-8''{quote(name)}")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("Content-Security-Policy", "sandbox; default-src 'none'; img-src 'self'; style-src 'unsafe-inline'")
+        self.send_header("Cache-Control", "private, max-age=86400")
+        self.end_headers()
+        self.wfile.write(body)
 
     def _new_agent(self, who):
         """Crea un agente (o gli dà un token nuovo): il token si vede solo qui."""
