@@ -13,8 +13,10 @@
 :root{--bg:#111118;--panel:#181822;--line:#262633;--ink:#ececf2;--dim:#9a9aae;--dim2:#6c6c80;--accent:#8B5CF6;--accent2:#22D3EE;--me:#3b2a6e;--ok:#5fd38d;--warn:#f0a03c;
  --safe-t:env(safe-area-inset-top,0px);--safe-b:env(safe-area-inset-bottom,0px);--safe-l:env(safe-area-inset-left,0px);--safe-r:env(safe-area-inset-right,0px)}
 *{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
-html,body{height:100%}
-body{margin:0;font:15px/1.45 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;background:var(--bg);color:var(--ink);display:flex;flex-direction:column;height:100dvh;overflow:hidden}
+html{height:100%;overflow:hidden}
+body{margin:0;font:15px/1.45 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;background:var(--bg);color:var(--ink);display:flex;flex-direction:column;overflow:hidden;
+ /* Pinned to the visible area (installed app, keyboard open): the composer is always on screen. */
+ position:fixed;top:0;left:0;right:0;height:var(--app-h,100%)}
 button,input,textarea,select{font:inherit;color:inherit}
 button{cursor:pointer;border:0;background:none}
 /* Header */
@@ -31,7 +33,7 @@ header img{width:30px;height:30px;flex-shrink:0}
 .icon:hover,.icon:focus-visible{background:#22222e;color:var(--ink)}
 .icon svg{width:21px;height:21px}
 /* Messages */
-#log{flex:1;overflow-y:auto;overscroll-behavior:contain;padding:12px calc(12px + var(--safe-r)) 8px calc(12px + var(--safe-l));display:flex;flex-direction:column;gap:8px}
+#log{flex:1 1 0;min-height:0;overflow-y:auto;overscroll-behavior:contain;padding:12px calc(12px + var(--safe-r)) 8px calc(12px + var(--safe-l));display:flex;flex-direction:column;gap:8px}
 .m{max-width:min(720px,88%);align-self:flex-start;background:var(--panel);border:1px solid var(--line);border-radius:16px 16px 16px 6px;padding:7px 11px 8px}
 .m.own{align-self:flex-end;background:var(--me);border-color:#4b3a85;border-radius:16px 16px 6px 16px}
 .m.in{margin-left:22px;border-left:3px solid #3a3a52}
@@ -211,5 +213,8 @@ $('installBtn').onclick=async()=>{if(!installEvt)return;installEvt.prompt();awai
 if('serviceWorker' in navigator)navigator.serviceWorker.register('/sw.js').catch(()=>{});
 // Back to the page after the phone slept: read again at once.
 document.addEventListener('visibilitychange',()=>{if(document.visibilityState=='visible'&&!online)restart()});
+// The visible height: the installed app and the phone's keyboard change it.
+function fit(){const v=window.visualViewport;document.documentElement.style.setProperty('--app-h',(v?v.height:window.innerHeight)+'px');if(v)document.body.style.top=v.offsetTop+'px'}
+fit();addEventListener('resize',fit);window.visualViewport?.addEventListener('resize',fit);window.visualViewport?.addEventListener('scroll',fit);
 grow();me().then(restart);
 </script></body></html>

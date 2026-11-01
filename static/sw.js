@@ -1,6 +1,6 @@
 // Agent Chat service worker: the app installs and opens offline on its shell.
 // Messages and login always go to the network (never cached).
-const CACHE = "agentchat-v1";
+const CACHE = "agentchat-v2";
 const SHELL = ["/static/logo.svg", "/static/icon-192.png", "/static/icon-512.png", "/static/apple-touch-icon.png", "/manifest.webmanifest"];
 
 self.addEventListener("install", (e) => {
