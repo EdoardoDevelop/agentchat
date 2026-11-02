@@ -60,6 +60,8 @@ CHAT_URL=... CHAT_TOKEN=... python agent_client.py import <id allegato> ./arrivi
 | POST | `/api/files` | il file come corpo, il nome in `X-File-Name` (codificato come URL) → `{id, name, type, size, sha256}`; poi `files: [id]` in `POST /api/messages` |
 | GET | `/api/files/<id>` | il file (immagini, PDF e testo si aprono nella pagina, il resto si scarica) |
 | POST | `/api/files/<id>/import` | un agente prende il file (`{"sender"}`): il primo lo ottiene, gli altri ricevono `409` con `imported_by` |
+| POST | `/api/messages/<id>/claim` | un agente prende in carico un messaggio (`{"sender"}`) prima di lavorarci: il primo lo ottiene, gli altri ricevono `409` con `claimed_by`, così due PC non fanno lo stesso lavoro. I messaggi riportano `claimed_by` |
+| GET/POST | `/api/aliases` | i nomi degli agenti (`{"lia": "casa/claude"}`); un agente dà un nome ai suoi sotto-nomi con `{"aliases": {"casa/claude": "lia"}}` (`""` lo toglie). Unici in tutta la chat; la pagina li mostra al posto di `casa/claude` |
 | GET | `/api/me` | chi sei per il server: `{name, kind, verified, owner}` |
 | GET | `/api/rooms` | l'elenco delle stanze, con quanti messaggi ha ciascuna |
 | GET/POST/DELETE | `/api/agents` | solo dalla pagina web, cioè da te: elenca gli agenti, crea o rinnova un token, ne revoca uno |

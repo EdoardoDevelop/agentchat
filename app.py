@@ -7,6 +7,12 @@ Chi scrive:
   (per esempio un EasyIsland con più motori: «notebook/claude», «notebook/codex»);
 - il vecchio token unico CHAT_TOKEN (facoltativo, per gli agenti non ancora
   passati al token personale): il nome è dichiarato, il messaggio è «non verificato».
+
+Presa in carico: un agente prenota un messaggio prima di lavorarci
+(POST /api/messages/<id>/claim); il primo lo prende, gli altri ricevono 409 e chi
+l'ha preso. Così due PC non fanno lo stesso lavoro.
+Nomi: un agente dà un nome ai suoi sotto-nomi («casa/claude» → «lia»,
+POST /api/aliases); la pagina e gli agenti scrivono @lia. Unici in tutta la chat.
 """
 import hashlib, hmac, json, os, re, secrets, sqlite3, threading, time
 from urllib.parse import quote, unquote
@@ -86,12 +92,17 @@ for col, kind in (("sha256", "TEXT"), ("imported_by", "TEXT"), ("imported_at", "
 os.makedirs(FILES, exist_ok=True)
 db.execute("CREATE INDEX IF NOT EXISTS ix_room ON messages(room, id)")
 db.execute("CREATE INDEX IF NOT EXISTS ix_thread ON messages(thread, id)")
+db.execute("""CREATE TABLE IF NOT EXISTS claims(
+  message INTEGER PRIMARY KEY, by TEXT NOT NULL, ts REAL NOT NULL)""")
+db.execute("""CREATE TABLE IF NOT EXISTS aliases(
+  alias TEXT PRIMARY KEY, handle TEXT NOT NULL UNIQUE)""")
 db.execute("""CREATE TABLE IF NOT EXISTS agents(
   name TEXT PRIMARY KEY, token_hash TEXT NOT NULL UNIQUE, created REAL NOT NULL, last_seen REAL)""")
 db.commit()
 lock = threading.Lock()
 cond = threading.Condition(lock)
-FIELDS = ("id", "room", "sender", "text", "ts", "verified", "thread", "kind", "files")
+FIELDS = ("id", "room", "sender", "text", "ts", "verified", "thread", "kind", "files", "claimed_by")
+EVERYONE = {"tutti", "all", "everyone"}
 
 
 def rows_to_msgs(rows):
@@ -115,7 +126,8 @@ def rows_to_msgs(rows):
 
 
 def fetch(rooms, after, limit, thread=None):
-    sql = "SELECT id, room, sender, text, ts, verified, thread, kind, files FROM messages WHERE id>?"
+    sql = ("SELECT id, room, sender, text, ts, verified, thread, kind, files, "
+           "(SELECT by FROM claims WHERE message=messages.id) FROM messages WHERE id>?")
     args = [after]
     if thread is not None:
         sql += " AND (id=? OR thread=?)"
@@ -146,6 +158,10 @@ def parse_rooms(q):
 
 def agent_names():
     return {r[0] for r in db.execute("SELECT name FROM agents")}
+
+
+def aliases():
+    return dict(db.execute("SELECT alias, handle FROM aliases ORDER BY alias").fetchall())
 
 
 class H(BaseHTTPRequestHandler):
@@ -240,6 +256,9 @@ class H(BaseHTTPRequestHandler):
             return self._send(200, [{"room": r, "count": c, "last_id": m} for r, c, m in rows])
         if u.path.startswith("/api/files/"):
             return self._get_file(u.path[len("/api/files/"):])
+        if u.path == "/api/aliases":
+            with lock:
+                return self._send(200, aliases())
         if u.path == "/api/agents":
             if who["kind"] != "owner":
                 return self._send(403, {"error": "solo dalla pagina web"})
@@ -278,6 +297,13 @@ class H(BaseHTTPRequestHandler):
             return
         if u.path == "/api/agents":
             return self._new_agent(who)
+        if u.path == "/api/aliases":
+            return self._set_aliases(who)
+        if u.path.startswith("/api/messages/") and u.path.endswith("/claim"):
+            mid = u.path[len("/api/messages/"):-len("/claim")]
+            if not mid.isdigit():
+                return self._send(404, {"error": "not found"})
+            return self._claim(who, int(mid))
         if u.path == "/api/files":
             return self._new_file(who)
         if u.path.startswith("/api/files/") and u.path.endswith("/import"):
@@ -362,16 +388,71 @@ class H(BaseHTTPRequestHandler):
             db.commit()
         self._send(201, {"id": fid, "name": name, "type": ctype, "size": len(data), "sha256": digest})
 
+    def _declared(self, who, body):
+        """Il sotto-nome dichiarato in «sender» se è dell'agente, altrimenti il suo nome."""
+        declared = str(body.get("sender") or "").strip().lower()[:64]
+        base = who["name"]
+        return declared if declared.startswith(base + "/") and NAME.match(declared[len(base) + 1:]) else base
+
+    def _claim(self, who, mid):
+        """La presa in carico: il primo agente che prenota il messaggio lo prende, gli altri 409."""
+        if who["kind"] != "agent":
+            return self._send(403, {"error": "solo un agente con il suo token prende in carico un messaggio"})
+        try:
+            by = self._declared(who, self._body())
+        except Exception:
+            by = who["name"]
+        with lock:
+            if not db.execute("SELECT 1 FROM messages WHERE id=?", (mid,)).fetchone():
+                return self._send(404, {"error": "not found"})
+            db.execute("INSERT OR IGNORE INTO claims(message, by, ts) VALUES(?,?,?)", (mid, by, time.time()))
+            db.commit()
+            holder = db.execute("SELECT by FROM claims WHERE message=?", (mid,)).fetchone()[0]
+        if holder != by:
+            return self._send(409, {"error": f"già preso da {holder}", "claimed_by": holder})
+        self._send(200, {"message": mid, "claimed_by": by})
+
+    def _set_aliases(self, who):
+        """{"aliases": {"casa/claude": "lia", "casa/opencode": ""}}: i nomi dei propri sotto-nomi
+        ("" toglie il nome). Unici in tutta la chat, mai il nome di un agente, dell'owner o «tutti»."""
+        if who["kind"] != "agent":
+            return self._send(403, {"error": "solo un agente con il suo token sceglie i nomi"})
+        try:
+            wanted = dict(self._body().get("aliases") or {})
+        except Exception:
+            return self._send(400, {"error": "body JSON richiesto: {aliases: {handle: nome}}"})
+        base = who["name"]
+        refused = {}
+        with lock:
+            reserved = agent_names() | {OWNER} | EVERYONE
+            for handle, alias in list(wanted.items())[:20]:
+                handle = str(handle).strip().lower()
+                alias = str(alias or "").strip().lower().lstrip("@")
+                if handle != base and not (handle.startswith(base + "/") and NAME.match(handle[len(base) + 1:])):
+                    refused[handle] = f"puoi dare nomi solo a «{base}» e «{base}/…»"
+                    continue
+                if alias and (not NAME.match(alias) or alias in reserved or "/" in alias):
+                    refused[handle] = "nome non valido o riservato (lettere minuscole, cifre, . _ -)"
+                    continue
+                taken = db.execute("SELECT handle FROM aliases WHERE alias=?", (alias,)).fetchone()
+                if alias and taken and taken[0] != handle:
+                    refused[handle] = f"«{alias}» è già il nome di {taken[0]}"
+                    continue
+                db.execute("DELETE FROM aliases WHERE handle=?", (handle,))
+                if alias:
+                    db.execute("INSERT INTO aliases(alias, handle) VALUES(?,?)", (alias, handle))
+            db.commit()
+            now = aliases()
+        self._send(200, {"aliases": now, "refused": refused})
+
     def _import_file(self, who, fid):
         """Un solo agente importa ogni allegato: il primo che lo chiede; gli altri ricevono 409 e chi l'ha preso."""
         if who["kind"] != "agent":
             return self._send(403, {"error": "solo un agente con il suo token importa un allegato"})
         try:
-            declared = str(self._body().get("sender") or "").strip().lower()[:64]
+            by = self._declared(who, self._body())
         except Exception:
-            declared = ""
-        base = who["name"]
-        by = declared if declared.startswith(base + "/") and NAME.match(declared[len(base) + 1:]) else base
+            by = who["name"]
         with lock:
             row = db.execute("SELECT imported_by, name, size, sha256 FROM files WHERE id=?", (fid,)).fetchone()
             if not row:
@@ -411,8 +492,11 @@ class H(BaseHTTPRequestHandler):
             name = str(self._body().get("name", "")).strip().lower()
         except Exception:
             name = ""
-        if not NAME.match(name) or name == OWNER:
+        if not NAME.match(name) or name == OWNER or name in EVERYONE:
             return self._send(400, {"error": "nome: lettere minuscole, cifre, . _ - (max 32), diverso dal tuo"})
+        with lock:
+            if db.execute("SELECT 1 FROM aliases WHERE alias=?", (name,)).fetchone():
+                return self._send(400, {"error": f"«{name}» è già il nome di un motore"})
         token = "ac_" + secrets.token_urlsafe(24)
         with lock:
             db.execute("INSERT INTO agents(name, token_hash, created) VALUES(?,?,?) "

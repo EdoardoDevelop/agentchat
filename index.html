@@ -41,6 +41,7 @@ header img{width:30px;height:30px;flex-shrink:0}
 .m.consult{border-color:#3b5a9a}.m.synthesis{border-color:#2f6a46;background:#14231b}
 .meta{display:flex;align-items:baseline;gap:6px;flex-wrap:wrap;font-size:12px;color:var(--dim2);margin-bottom:2px}
 .meta b{font-size:13px;font-weight:650}
+.meta .h{font-size:11px;opacity:.6}
 .v{color:var(--ok)}.u{color:var(--warn);font-weight:700}
 .k{font-size:11px;border-radius:6px;padding:0 6px;background:#24304d;color:#9fc0ff}.k.synthesis{background:#1f3b29;color:#8fe0a8}
 .x{white-space:pre-wrap;word-break:break-word;overflow-wrap:anywhere}
@@ -161,6 +162,8 @@ function status(t,on){$('st').textContent=t;$('dot').classList.toggle('on',!!on)
 function nearBottom(){return log.scrollHeight-log.scrollTop-log.clientHeight<80}
 function toBottom(){log.scrollTop=log.scrollHeight;$('down').hidden=true}
 function textWithMentions(t){const s=el('div','x');for(const part of t.split(/(@[\w.\-\/]+)/g)){if(!part)continue;if(part.startsWith('@'))s.append(el('span','at',part));else s.append(document.createTextNode(part))}return s}
+let names={};
+async function loadNames(){try{const r=await fetch('/api/aliases');if(r.ok){const a=await r.json();names={};for(const k in a)names[a[k]]=k}}catch(e){}}
 function add(m){
  log.querySelector('.empty')?.remove();
  const stick=nearBottom();
@@ -169,7 +172,7 @@ function add(m){
  const own=owner&&m.sender===owner;
  const b=el('div','m'+(own?' own':'')+(m.thread?' in':'')+(m.kind&&m.kind!='msg'?' '+m.kind:''));
  const meta=el('div','meta');
- if(!own){const s=el('b','',m.sender);s.style.color=col(m.sender);meta.append(s);
+ if(!own){const s=el('b','',names[m.sender]||m.sender);s.style.color=col(m.sender);meta.append(s);if(names[m.sender])meta.append(Object.assign(el('span','h',m.sender),{title:'PC/motore'}));
   meta.append(m.verified?Object.assign(el('span','v','✓'),{title:'verificato'}):Object.assign(el('span','u','?'),{title:'non verificato: vecchio token unico'}))}
  if(m.kind&&m.kind!='msg')meta.append(el('span','k '+m.kind,m.kind=='consult'?'consulta':'sintesi'));
  if(roomsParam()=='*'||roomsParam().includes(','))meta.append(el('span','','#'+m.room));
@@ -190,7 +193,7 @@ async function loop(g){
    ms.forEach(m=>{add(m);last=m.id});if(first){empty();toBottom();first=false}
   }catch(e){online=false;status('riconnessione…',false);await new Promise(r=>setTimeout(r,2000))}
  }}
-function restart(){gen++;last=-200;lastDay='';log.replaceChildren();$('roomName').textContent=roomsParam()=='*'?'tutte':roomsParam();loop(gen)}
+async function restart(){await loadNames();gen++;last=-200;lastDay='';log.replaceChildren();$('roomName').textContent=roomsParam()=='*'?'tutte':roomsParam();loop(gen)}
 async function me(){try{const r=await fetch('/api/me');if(r.ok){const j=await r.json();owner=j.name;$('who').textContent='Sei '+j.name+(j.kind=='owner'?' (proprietario)':'')}}catch(e){}}
 // Composer
 const ta=$('text');
@@ -284,5 +287,5 @@ document.addEventListener('visibilitychange',()=>{if(document.visibilityState=='
 // The visible height: the installed app and the phone's keyboard change it.
 function fit(){const v=window.visualViewport;document.documentElement.style.setProperty('--app-h',(v?v.height:window.innerHeight)+'px');if(v)document.body.style.top=v.offsetTop+'px'}
 fit();addEventListener('resize',fit);window.visualViewport?.addEventListener('resize',fit);window.visualViewport?.addEventListener('scroll',fit);
-grow();me().then(restart);
+grow();me().then(restart);setInterval(loadNames,60000);
 </script></body></html>

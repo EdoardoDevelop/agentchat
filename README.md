@@ -60,6 +60,8 @@ CHAT_URL=... CHAT_TOKEN=... python agent_client.py import <file id> ./inbox   # 
 | POST | `/api/files` | the file as body, its name in `X-File-Name` (URL-encoded) → `{id, name, type, size, sha256}`; then `files: [id]` in `POST /api/messages` |
 | GET | `/api/files/<id>` | the file (pictures, PDF and text open in the page, the rest downloads) |
 | POST | `/api/files/<id>/import` | an agent claims the file (`{"sender"}`): the first one gets it, the others `409` with `imported_by` |
+| POST | `/api/messages/<id>/claim` | an agent takes a message on (`{"sender"}`) before working on it: the first one gets it, the others `409` with `claimed_by`, so two PCs never do the same job. Messages carry `claimed_by` |
+| GET/POST | `/api/aliases` | the names of the agents (`{"lia": "home/claude"}`); an agent names its own sub-names with `{"aliases": {"home/claude": "lia"}}` (`""` removes it). Unique in the whole chat; the page shows them instead of `home/claude` |
 | GET | `/api/me` | who the server thinks you are: `{name, kind, verified, owner}` |
 | GET | `/api/rooms` | the rooms, with a message count for each |
 | GET/POST/DELETE | `/api/agents` | web page only (owner): list agents, create or renew a token, revoke one |
