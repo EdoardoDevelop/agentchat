@@ -13,6 +13,12 @@ Presa in carico: un agente prenota un messaggio prima di lavorarci
 l'ha preso. Così due PC non fanno lo stesso lavoro.
 Nomi: un agente dà un nome ai suoi sotto-nomi («casa/claude» → «lia»,
 POST /api/aliases); la pagina e gli agenti scrivono @lia. Unici in tutta la chat.
+Chi c'è: GET /api/presence, online = in ascolto adesso o visto da pochi secondi.
+Memoria condivisa: un agente carica la sua (PUT /api/memory), gli altri ne leggono la
+copia (GET /api/memory/<agente>), la interrogano dal vivo se è acceso
+(POST /api/memory/<agente>/ask, risposta entro pochi secondi o 504) e gli lasciano note
+(POST /api/memory/<agente>/note), che lui applica appena è in ascolto
+(GET /api/memory/requests, POST /api/memory/requests/<id>).
 """
 import hashlib, hmac, json, os, re, secrets, sqlite3, threading, time
 from urllib.parse import quote, unquote
@@ -96,11 +102,21 @@ db.execute("""CREATE TABLE IF NOT EXISTS claims(
   message INTEGER PRIMARY KEY, by TEXT NOT NULL, ts REAL NOT NULL)""")
 db.execute("""CREATE TABLE IF NOT EXISTS aliases(
   alias TEXT PRIMARY KEY, handle TEXT NOT NULL UNIQUE)""")
+db.execute("""CREATE TABLE IF NOT EXISTS memory(
+  agent TEXT PRIMARY KEY, rev INTEGER NOT NULL, ts REAL NOT NULL, data TEXT NOT NULL)""")
+db.execute("""CREATE TABLE IF NOT EXISTS memreq(
+  id INTEGER PRIMARY KEY AUTOINCREMENT, agent TEXT NOT NULL, sender TEXT NOT NULL, kind TEXT NOT NULL,
+  body TEXT NOT NULL, ts REAL NOT NULL, answer TEXT, done INTEGER NOT NULL DEFAULT 0)""")
 db.execute("""CREATE TABLE IF NOT EXISTS agents(
   name TEXT PRIMARY KEY, token_hash TEXT NOT NULL UNIQUE, created REAL NOT NULL, last_seen REAL)""")
 db.commit()
 lock = threading.Lock()
 cond = threading.Condition(lock)
+# Who is listening right now (long polls open), for /api/presence.
+listening = {}
+ONLINE_SECS = 15     # seen this recently = online, even between two polls
+ASK_SECS = 8         # a live question to another agent's memory waits this much
+MAX_MEMORY = 20 * 1024 * 1024
 FIELDS = ("id", "room", "sender", "text", "ts", "verified", "thread", "kind", "files", "claimed_by")
 EVERYONE = {"tutti", "all", "everyone"}
 
@@ -162,6 +178,26 @@ def agent_names():
 
 def aliases():
     return dict(db.execute("SELECT alias, handle FROM aliases ORDER BY alias").fetchall())
+
+
+def presence():
+    now = time.time()
+    rows = db.execute("SELECT name, last_seen FROM agents ORDER BY name").fetchall()
+    return {n: {"online": listening.get(n, 0) > 0 or now - (s or 0) < ONLINE_SECS, "last_seen": s} for n, s in rows}
+
+
+class Listening:
+    """While an agent waits in a long poll it is online."""
+    def __init__(self, who):
+        self.name = who["name"] if who["kind"] == "agent" else None
+
+    def __enter__(self):
+        if self.name:
+            listening[self.name] = listening.get(self.name, 0) + 1
+
+    def __exit__(self, *a):
+        if self.name:
+            listening[self.name] = max(listening.get(self.name, 1) - 1, 0)
 
 
 class H(BaseHTTPRequestHandler):
@@ -244,7 +280,7 @@ class H(BaseHTTPRequestHandler):
                 with lock:
                     after = max(last_id(rooms) + after, 0)
             deadline = time.time() + wait
-            with cond:
+            with cond, Listening(who):
                 msgs = fetch(rooms, after, limit, thread)
                 while not msgs and time.time() < deadline:
                     cond.wait(deadline - time.time())
@@ -259,6 +295,13 @@ class H(BaseHTTPRequestHandler):
         if u.path == "/api/aliases":
             with lock:
                 return self._send(200, aliases())
+        if u.path == "/api/presence":
+            with lock:
+                return self._send(200, presence())
+        if u.path == "/api/memory/requests":
+            return self._memory_requests(who, q)
+        if u.path.startswith("/api/memory/"):
+            return self._get_memory(u.path[len("/api/memory/"):], q)
         if u.path == "/api/agents":
             if who["kind"] != "owner":
                 return self._send(403, {"error": "solo dalla pagina web"})
@@ -282,6 +325,15 @@ class H(BaseHTTPRequestHandler):
             db.commit()
         self._send(200 if cur.rowcount else 404, {"deleted": bool(cur.rowcount)})
 
+    def do_PUT(self):
+        u = urlparse(self.path)
+        who = self._auth()
+        if not who:
+            return
+        if u.path != "/api/memory":
+            return self._send(404, {"error": "not found"})
+        return self._put_memory(who)
+
     def do_POST(self):
         u = urlparse(self.path)
         if u.path == "/login":
@@ -304,6 +356,12 @@ class H(BaseHTTPRequestHandler):
             if not mid.isdigit():
                 return self._send(404, {"error": "not found"})
             return self._claim(who, int(mid))
+        if u.path.startswith("/api/memory/requests/"):
+            return self._memory_done(who, u.path[len("/api/memory/requests/"):])
+        if u.path.startswith("/api/memory/") and u.path.endswith("/ask"):
+            return self._memory_ask(who, u.path[len("/api/memory/"):-len("/ask")])
+        if u.path.startswith("/api/memory/") and u.path.endswith("/note"):
+            return self._memory_note(who, u.path[len("/api/memory/"):-len("/note")])
         if u.path == "/api/files":
             return self._new_file(who)
         if u.path.startswith("/api/files/") and u.path.endswith("/import"):
@@ -444,6 +502,123 @@ class H(BaseHTTPRequestHandler):
             db.commit()
             now = aliases()
         self._send(200, {"aliases": now, "refused": refused})
+
+    # Shared memory
+
+    def _put_memory(self, who):
+        """{"files": {"MEMORIA.md": "…", "pagine/Rossi.md": "…"}}: la memoria dell'agente, intera."""
+        if who["kind"] != "agent":
+            return self._send(403, {"error": "solo un agente con il suo token condivide la memoria"})
+        n = int(self.headers.get("Content-Length", 0) or 0)
+        if n > MAX_MEMORY:
+            return self._send(413, {"error": "memoria troppo grande"})
+        try:
+            files = json.loads(self.rfile.read(n) or b"{}").get("files")
+            assert isinstance(files, dict) and all(isinstance(k, str) and isinstance(v, str) for k, v in files.items())
+        except Exception:
+            return self._send(400, {"error": "body JSON richiesto: {files: {percorso: testo}}"})
+        with lock:
+            row = db.execute("SELECT rev FROM memory WHERE agent=?", (who["name"],)).fetchone()
+            rev = (row[0] if row else 0) + 1
+            db.execute("INSERT INTO memory(agent, rev, ts, data) VALUES(?,?,?,?) ON CONFLICT(agent) DO UPDATE SET "
+                       "rev=excluded.rev, ts=excluded.ts, data=excluded.data", (who["name"], rev, time.time(), json.dumps(files)))
+            db.commit()
+        self._send(200, {"rev": rev})
+
+    def _get_memory(self, agent, q):
+        """La copia della memoria di un agente; con ?rev=N e niente di nuovo, solo {rev}."""
+        with lock:
+            row = db.execute("SELECT rev, ts, data FROM memory WHERE agent=?", (agent,)).fetchone()
+        if not row:
+            return self._send(404, {"error": f"{agent} non condivide la memoria"})
+        if q.get("rev", [""])[0] == str(row[0]):
+            return self._send(200, {"rev": row[0], "ts": row[1]})
+        self._send(200, {"rev": row[0], "ts": row[1], "files": json.loads(row[2])})
+
+    def _memory_ask(self, who, agent):
+        """{"query"}: cerca nella memoria dell'agente, se è acceso; 504 se non risponde in tempo."""
+        if who["kind"] != "agent" or agent == who["name"]:
+            return self._send(403, {"error": "solo un altro agente"})
+        try:
+            query = str(self._body().get("query") or "").strip()[:300]
+            assert query
+        except Exception:
+            return self._send(400, {"error": "body JSON richiesto: {query}"})
+        with cond:
+            if agent not in agent_names():
+                return self._send(404, {"error": "agente inesistente"})
+            cur = db.execute("INSERT INTO memreq(agent, sender, kind, body, ts) VALUES(?,?,?,?,?)",
+                             (agent, who["name"], "ask", query, time.time()))
+            rid = cur.lastrowid
+            db.commit()
+            cond.notify_all()
+            deadline = time.time() + ASK_SECS
+            row = None
+            while time.time() < deadline:
+                row = db.execute("SELECT answer FROM memreq WHERE id=? AND done=1", (rid,)).fetchone()
+                if row:
+                    break
+                cond.wait(deadline - time.time())
+            # Late is useless: nobody answers it any more.
+            db.execute("UPDATE memreq SET done=1 WHERE id=?", (rid,))
+            db.commit()
+        if not row:
+            return self._send(504, {"error": f"{agent} non risponde"})
+        self._send(200, {"answer": row[0] or ""})
+
+    def _memory_note(self, who, agent):
+        """{"text"}: una nota per la memoria dell'agente; la applica lui appena è in ascolto."""
+        if who["kind"] != "agent" or agent == who["name"]:
+            return self._send(403, {"error": "solo un altro agente"})
+        try:
+            text = str(self._body().get("text") or "").strip()[:1000]
+            assert text
+        except Exception:
+            return self._send(400, {"error": "body JSON richiesto: {text}"})
+        with cond:
+            if agent not in agent_names():
+                return self._send(404, {"error": "agente inesistente"})
+            cur = db.execute("INSERT INTO memreq(agent, sender, kind, body, ts) VALUES(?,?,?,?,?)",
+                             (agent, who["name"], "note", text, time.time()))
+            db.commit()
+            cond.notify_all()
+            online = presence().get(agent, {}).get("online", False)
+        self._send(202, {"id": cur.lastrowid, "online": online})
+
+    def _memory_requests(self, who, q):
+        """Le richieste per la propria memoria ancora da fare (domande ancora fresche, note), con ?wait=s."""
+        if who["kind"] != "agent":
+            return self._send(403, {"error": "solo un agente"})
+        try:
+            wait = max(0.0, min(float(q.get("wait", ["0"])[0]), 60))
+        except ValueError:
+            wait = 0.0
+        deadline = time.time() + wait
+        sql = ("SELECT id, sender, kind, body, ts FROM memreq WHERE agent=? AND done=0 "
+               "AND (kind='note' OR ts>?) ORDER BY id LIMIT 50")
+        with cond, Listening(who):
+            rows = db.execute(sql, (who["name"], time.time() - ASK_SECS)).fetchall()
+            while not rows and time.time() < deadline:
+                cond.wait(deadline - time.time())
+                rows = db.execute(sql, (who["name"], time.time() - ASK_SECS)).fetchall()
+        self._send(200, [dict(zip(("id", "sender", "kind", "body", "ts"), r)) for r in rows])
+
+    def _memory_done(self, who, rid):
+        """{"answer"?}: la richiesta è fatta (la risposta a una domanda)."""
+        if who["kind"] != "agent":
+            return self._send(403, {"error": "solo un agente"})
+        try:
+            ans = str(self._body().get("answer") or "")[:20000]
+            rid = int(rid)
+        except Exception:
+            return self._send(400, {"error": "body JSON richiesto: {answer?}"})
+        with cond:
+            cur = db.execute("UPDATE memreq SET answer=?, done=1 WHERE id=? AND agent=? AND done=0", (ans, rid, who["name"]))
+            # Old done requests go away.
+            db.execute("DELETE FROM memreq WHERE done=1 AND ts<?", (time.time() - 86400,))
+            db.commit()
+            cond.notify_all()
+        self._send(200 if cur.rowcount else 404, {"done": bool(cur.rowcount)})
 
     def _import_file(self, who, fid):
         """Un solo agente importa ogni allegato: il primo che lo chiede; gli altri ricevono 409 e chi l'ha preso."""

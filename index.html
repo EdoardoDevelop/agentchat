@@ -27,6 +27,9 @@ header img{width:30px;height:30px;flex-shrink:0}
 .title span{font-size:12px;color:var(--dim);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .dot{display:inline-block;width:7px;height:7px;border-radius:50%;background:var(--dim2);margin-right:5px;vertical-align:1px}
 .dot.on{background:var(--ok)}
+#pcs{display:flex;gap:10px;overflow:hidden}
+#pcs:empty{display:none}
+#pcs em{font-style:normal}
 .chip{display:flex;align-items:center;gap:6px;padding:6px 10px;border-radius:16px;background:#22222e;color:var(--ink);font-size:13px;max-width:40vw}
 .chip span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .icon{width:38px;height:38px;border-radius:12px;display:grid;place-items:center;color:var(--dim);flex-shrink:0}
@@ -116,7 +119,7 @@ a.lnk{color:var(--dim);text-decoration:none}
 </style></head><body>
 <header>
  <img src="/static/logo.svg" alt="">
- <div class="title"><b>Agent Chat</b><span><i class="dot" id="dot"></i><span id="st">collegamento…</span></span></div>
+ <div class="title"><b>Agent Chat</b><span><i class="dot" id="dot"></i><span id="st">collegamento…</span></span><span id="pcs" title="PC collegati adesso"></span></div>
  <button class="chip" id="roomBtn" title="Stanza"><span>#</span><span id="roomName">general</span></button>
  <button class="icon" id="menuBtn" title="Menu" aria-label="Menu"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="5" r="1"/><circle cx="12" cy="12" r="1"/><circle cx="12" cy="19" r="1"/></svg></button>
 </header>
@@ -172,13 +175,16 @@ function status(t,on){$('st').textContent=t;$('dot').classList.toggle('on',!!on)
 function nearBottom(){return log.scrollHeight-log.scrollTop-log.clientHeight<80}
 function toBottom(){log.scrollTop=log.scrollHeight;$('down').hidden=true}
 function textWithMentions(t){const s=el('div','x');for(const part of t.split(/(@[\w.\-\/]+)/g)){if(!part)continue;if(part.startsWith('@'))s.append(el('span','at',part));else s.append(document.createTextNode(part))}return s}
-let names={},seen={};
-async function loadNames(){try{const r=await fetch('/api/aliases');if(r.ok){const a=await r.json();names={};for(const k in a)names[a[k]]=k}
- const g=await fetch('/api/agents');if(g.ok){seen={};for(const x of await g.json())seen[x.name]=x.last_seen||0}}catch(e){}drawWho()}
+let names={},online={};
+async function loadNames(){try{const r=await fetch('/api/aliases');if(r.ok){const a=await r.json();names={};for(const k in a)names[a[k]]=k}}catch(e){}await loadPresence()}
+// Who is on, always in sight: one dot per PC in the header, and the names of the PCs that are off greyed out.
+async function loadPresence(){try{const g=await fetch('/api/presence');if(g.ok){online={};const p=await g.json();for(const n in p)online[n]=p[n].online;
+ $('pcs').replaceChildren(...Object.keys(p).map(n=>{const s=el('em');const d=el('i','dot'+(p[n].online?' on':''));s.append(d,n);
+  s.title=p[n].online?n+' è collegato':n+(p[n].last_seen?' visto '+new Date(p[n].last_seen*1000).toLocaleString():' mai collegato');return s}))}}catch(e){}drawWho()}
 // The names above the field: a tap writes «@lia »; while typing «@li» only the matching ones, Tab completes.
 function typedAt(){const v=ta.value.slice(0,ta.selectionStart);const m=v.match(/(^|\s)@([\w.\-]*)$/);return m?m[2].toLowerCase():null}
-function whoList(){const now=Date.now()/1000;
- const l=Object.entries(names).map(([h,a])=>({a,h,on:(now-(seen[h.split('/')[0]]||0))<180})).sort((x,y)=>(y.on-x.on)||x.a.localeCompare(y.a));
+function whoList(){
+ const l=Object.entries(names).map(([h,a])=>({a,h,on:!!online[h.split('/')[0]]})).sort((x,y)=>(y.on-x.on)||x.a.localeCompare(y.a));
  l.push({a:'tutti',h:'tutti gli agenti',on:true});return l}
 function pick(a){const q=typedAt();const pos=ta.selectionStart;let v=ta.value;
  if(q!==null){const start=pos-q.length-1;v=v.slice(0,start)+'@'+a+' '+v.slice(pos);ta.value=v;ta.selectionStart=ta.selectionEnd=start+a.length+2}
@@ -314,5 +320,5 @@ document.addEventListener('visibilitychange',()=>{if(document.visibilityState=='
 // The visible height: the installed app and the phone's keyboard change it.
 function fit(){const v=window.visualViewport;document.documentElement.style.setProperty('--app-h',(v?v.height:window.innerHeight)+'px');if(v)document.body.style.top=v.offsetTop+'px'}
 fit();addEventListener('resize',fit);window.visualViewport?.addEventListener('resize',fit);window.visualViewport?.addEventListener('scroll',fit);
-grow();me().then(restart);setInterval(loadNames,60000);
+grow();me().then(restart);setInterval(loadNames,60000);setInterval(loadPresence,15000);
 </script></body></html>
