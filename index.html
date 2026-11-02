@@ -59,6 +59,15 @@ form#f{display:flex;align-items:flex-end;gap:8px;padding:8px calc(10px + var(--s
 .send:disabled{opacity:.4}
 .send svg{width:20px;height:20px}
 /* Attachments */
+#who{display:flex;gap:6px;overflow-x:auto;scrollbar-width:none;padding:7px calc(10px + var(--safe-r)) 0 calc(10px + var(--safe-l));background:var(--panel);border-top:1px solid var(--line);flex-shrink:0}
+#who::-webkit-scrollbar{display:none}
+#who:empty{display:none}
+#who+#att{border-top:0}
+#who:not(:empty)~form#f{border-top:0}
+.nick{flex-shrink:0;display:flex;align-items:baseline;gap:5px;padding:4px 10px;border-radius:14px;background:#22222e;border:1px solid var(--line);font-size:13px;color:var(--ink);white-space:nowrap}
+.nick small{color:var(--dim2);font-size:11px}
+.nick.off{opacity:.45}
+.nick.hit{border-color:var(--accent)}
 #att{display:flex;flex-wrap:wrap;gap:6px;padding:8px calc(10px + var(--safe-r)) 0 calc(10px + var(--safe-l));background:var(--panel);border-top:1px solid var(--line);flex-shrink:0}
 #att:empty{display:none}
 #att:not(:empty)+form#f{border-top:0}
@@ -113,6 +122,7 @@ a.lnk{color:var(--dim);text-decoration:none}
 </header>
 <div id="log"></div>
 <button id="down" hidden aria-label="Ultimi messaggi"><svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9l6 6 6-6"/></svg></button>
+<div id="who" aria-label="Agenti: tocca per chiamarne uno"></div>
 <div id="att"></div>
 <div id="drop" hidden>Rilascia per allegare</div>
 <form id="f">
@@ -162,8 +172,24 @@ function status(t,on){$('st').textContent=t;$('dot').classList.toggle('on',!!on)
 function nearBottom(){return log.scrollHeight-log.scrollTop-log.clientHeight<80}
 function toBottom(){log.scrollTop=log.scrollHeight;$('down').hidden=true}
 function textWithMentions(t){const s=el('div','x');for(const part of t.split(/(@[\w.\-\/]+)/g)){if(!part)continue;if(part.startsWith('@'))s.append(el('span','at',part));else s.append(document.createTextNode(part))}return s}
-let names={};
-async function loadNames(){try{const r=await fetch('/api/aliases');if(r.ok){const a=await r.json();names={};for(const k in a)names[a[k]]=k}}catch(e){}}
+let names={},seen={};
+async function loadNames(){try{const r=await fetch('/api/aliases');if(r.ok){const a=await r.json();names={};for(const k in a)names[a[k]]=k}
+ const g=await fetch('/api/agents');if(g.ok){seen={};for(const x of await g.json())seen[x.name]=x.last_seen||0}}catch(e){}drawWho()}
+// The names above the field: a tap writes «@lia »; while typing «@li» only the matching ones, Tab completes.
+function typedAt(){const v=ta.value.slice(0,ta.selectionStart);const m=v.match(/(^|\s)@([\w.\-]*)$/);return m?m[2].toLowerCase():null}
+function whoList(){const now=Date.now()/1000;
+ const l=Object.entries(names).map(([h,a])=>({a,h,on:(now-(seen[h.split('/')[0]]||0))<180})).sort((x,y)=>(y.on-x.on)||x.a.localeCompare(y.a));
+ l.push({a:'tutti',h:'tutti gli agenti',on:true});return l}
+function pick(a){const q=typedAt();const pos=ta.selectionStart;let v=ta.value;
+ if(q!==null){const start=pos-q.length-1;v=v.slice(0,start)+'@'+a+' '+v.slice(pos);ta.value=v;ta.selectionStart=ta.selectionEnd=start+a.length+2}
+ else{const pre=v.slice(0,pos);const sp=pre&&!/\s$/.test(pre)?' ':'';ta.value=pre+sp+'@'+a+' '+v.slice(pos);ta.selectionStart=ta.selectionEnd=pos+sp.length+a.length+2}
+ ta.focus();grow();drawWho()}
+function drawWho(){const box=$('who');if(!box)return;const q=typedAt();
+ const l=whoList().filter(x=>q===null||x.a.startsWith(q)||x.h.startsWith(q));
+ if(!Object.keys(names).length){box.replaceChildren();return}
+ box.replaceChildren(...l.map(x=>{const b=el('button','nick'+(x.on?'':' off')+(q?' hit':''));b.type='button';
+  b.title=x.h+(x.on?'':' (non collegato)');b.append(el('span','','@'+x.a),el('small','',x.h));
+  b.onmousedown=e=>e.preventDefault();b.onclick=()=>pick(x.a);return b}))}
 function add(m){
  log.querySelector('.empty')?.remove();
  const stick=nearBottom();
@@ -235,7 +261,8 @@ addEventListener('dragenter',e=>{if([...(e.dataTransfer?.types||[])].includes('F
 addEventListener('dragleave',()=>{if(--dragN<=0){dragN=0;$('drop').hidden=true}});
 addEventListener('dragover',e=>{if([...(e.dataTransfer?.types||[])].includes('Files'))e.preventDefault()});
 addEventListener('drop',e=>{dragN=0;$('drop').hidden=true;const fs=[...(e.dataTransfer?.files||[])];if(fs.length){e.preventDefault();attach(fs)}});
-ta.addEventListener('input',grow);
+ta.addEventListener('input',grow);ta.addEventListener('input',drawWho);ta.addEventListener('click',drawWho);
+ta.addEventListener('keydown',e=>{if(e.key=='Tab'&&typedAt()!==null){const f=$('who').querySelector('.nick');if(f){e.preventDefault();f.click()}}});
 const touch=matchMedia('(pointer:coarse)').matches;
 ta.addEventListener('keydown',e=>{if(e.key=='Enter'&&!e.shiftKey&&!touch&&!e.isComposing){e.preventDefault();$('f').requestSubmit()}});
 async function post(kind){const t=ta.value;const files=pending.filter(p=>p.id).map(p=>p.id);
