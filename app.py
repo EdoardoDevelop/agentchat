@@ -14,6 +14,12 @@ l'ha preso. Così due PC non fanno lo stesso lavoro.
 Nomi: un agente dà un nome ai suoi sotto-nomi («casa/claude» → «lia»,
 POST /api/aliases); la pagina e gli agenti scrivono @lia. Unici in tutta la chat.
 Chi c'è: GET /api/presence, online = in ascolto adesso o visto da pochi secondi.
+Scrivere come l'owner da un'app (EasyIsland): un token owner creato dalla pagina
+(«Token per scrivere come te», POST /api/owner-tokens); il messaggio è dell'owner,
+verificato, con «human» = 1, anche se firmato con un nome scelto nell'app.
+Stato degli agenti, senza storico: ogni agente dice cosa fa con un messaggio
+(POST /api/status: in coda, ragiona, usa strumenti, scrive, fatto, nessuna risposta);
+GET /api/status dà chi sta lavorando, le prese in carico recenti e chi non ha risposto.
 Memoria condivisa: un agente carica la sua (PUT /api/memory), gli altri ne leggono la
 copia (GET /api/memory/<agente>), la interrogano dal vivo se è acceso
 (POST /api/memory/<agente>/ask, risposta entro pochi secondi o 504) e gli lasciano note
@@ -88,6 +94,9 @@ if "kind" not in cols:
     db.execute("ALTER TABLE messages ADD COLUMN kind TEXT NOT NULL DEFAULT 'msg'")
 if "files" not in cols:
     db.execute("ALTER TABLE messages ADD COLUMN files TEXT")
+if "human" not in cols:
+    db.execute("ALTER TABLE messages ADD COLUMN human INTEGER NOT NULL DEFAULT 0")
+    db.execute("UPDATE messages SET human=1 WHERE sender=?", (OWNER,))
 db.execute("""CREATE TABLE IF NOT EXISTS files(
   id TEXT PRIMARY KEY, name TEXT NOT NULL, type TEXT NOT NULL, size INTEGER NOT NULL,
   sender TEXT NOT NULL, ts REAL NOT NULL, message INTEGER)""")
@@ -109,6 +118,8 @@ db.execute("""CREATE TABLE IF NOT EXISTS memreq(
   body TEXT NOT NULL, ts REAL NOT NULL, answer TEXT, done INTEGER NOT NULL DEFAULT 0)""")
 db.execute("""CREATE TABLE IF NOT EXISTS agents(
   name TEXT PRIMARY KEY, token_hash TEXT NOT NULL UNIQUE, created REAL NOT NULL, last_seen REAL)""")
+db.execute("""CREATE TABLE IF NOT EXISTS owner_tokens(
+  label TEXT PRIMARY KEY, token_hash TEXT NOT NULL UNIQUE, created REAL NOT NULL, last_seen REAL)""")
 db.commit()
 lock = threading.Lock()
 cond = threading.Condition(lock)
@@ -117,7 +128,15 @@ listening = {}
 ONLINE_SECS = 15     # seen this recently = online, even between two polls
 ASK_SECS = 8         # a live question to another agent's memory waits this much
 MAX_MEMORY = 20 * 1024 * 1024
-FIELDS = ("id", "room", "sender", "text", "ts", "verified", "thread", "kind", "files", "claimed_by")
+FIELDS = ("id", "room", "sender", "text", "ts", "verified", "thread", "kind", "files", "human", "claimed_by")
+# What each agent is doing now (POST /api/status), in memory only: handle ->
+# {message, state, detail, since, ts}. Gone after ACTIVE_SECS without news.
+activity = {}
+ACTIVE_SECS = 120
+WORKING = ("queued", "thinking", "tools", "writing")
+# Who had nothing to say or failed, per message, for a while: id -> {handle: state}.
+outcomes = {}
+OUTCOME_SECS = 1800
 EVERYONE = {"tutti", "all", "everyone"}
 
 
@@ -126,6 +145,7 @@ def rows_to_msgs(rows):
     for r in rows:
         m = dict(zip(FIELDS, r))
         m["verified"] = bool(m["verified"])
+        m["human"] = bool(m["human"])
         try:
             m["files"] = json.loads(m["files"]) if m["files"] else []
         except ValueError:
@@ -142,7 +162,7 @@ def rows_to_msgs(rows):
 
 
 def fetch(rooms, after, limit, thread=None):
-    sql = ("SELECT id, room, sender, text, ts, verified, thread, kind, files, "
+    sql = ("SELECT id, room, sender, text, ts, verified, thread, kind, files, human, "
            "(SELECT by FROM claims WHERE message=messages.id) FROM messages WHERE id>?")
     args = [after]
     if thread is not None:
@@ -184,6 +204,23 @@ def presence():
     now = time.time()
     rows = db.execute("SELECT name, last_seen FROM agents ORDER BY name").fetchall()
     return {n: {"online": listening.get(n, 0) > 0 or now - (s or 0) < ONLINE_SECS, "last_seen": s} for n, s in rows}
+
+
+def status_now():
+    """Who works on what now, recent claims and the agents that did not answer."""
+    now = time.time()
+    for h in [h for h, a in activity.items() if now - a["ts"] > ACTIVE_SECS]:
+        activity.pop(h, None)
+    for mid in [m for m, o in outcomes.items() if now - o.get("_ts", 0) > OUTCOME_SECS]:
+        outcomes.pop(mid, None)
+    claims = {str(m): b for m, b in db.execute("SELECT message, by FROM claims WHERE ts>?", (now - OUTCOME_SECS,)).fetchall()}
+    return {
+        "active": [dict(by=h, **{k: v for k, v in a.items() if k != "ts"}) for h, a in sorted(activity.items())],
+        "outcomes": {str(m): {h: s for h, s in o.items() if h != "_ts"} for m, o in outcomes.items()},
+        "claims": claims,
+        "online": {n: p["online"] for n, p in presence().items()},
+        "now": now,
+    }
 
 
 class Listening:
@@ -232,6 +269,11 @@ class H(BaseHTTPRequestHandler):
                 db.execute("UPDATE agents SET last_seen=? WHERE name=?", (time.time(), row[0]))
                 db.commit()
                 return {"kind": "agent", "name": row[0]}
+            row = db.execute("SELECT label FROM owner_tokens WHERE token_hash=?", (token_hash(tok),)).fetchone()
+            if row:
+                db.execute("UPDATE owner_tokens SET last_seen=? WHERE label=?", (time.time(), row[0]))
+                db.commit()
+                return {"kind": "owner", "name": OWNER, "via": row[0]}
         if LEGACY and hmac.compare_digest(tok, LEGACY):
             return {"kind": "legacy", "name": ""}
         return None
@@ -298,12 +340,21 @@ class H(BaseHTTPRequestHandler):
         if u.path == "/api/presence":
             with lock:
                 return self._send(200, presence())
+        if u.path == "/api/status":
+            with lock:
+                return self._send(200, status_now())
+        if u.path == "/api/owner-tokens":
+            if who["kind"] != "owner" or who.get("via"):
+                return self._send(403, {"error": "solo dalla pagina web"})
+            with lock:
+                rows = db.execute("SELECT label, created, last_seen FROM owner_tokens ORDER BY label").fetchall()
+            return self._send(200, [{"label": n, "created": c, "last_seen": s} for n, c, s in rows])
         if u.path == "/api/memory/requests":
             return self._memory_requests(who, q)
         if u.path.startswith("/api/memory/"):
             return self._get_memory(u.path[len("/api/memory/"):], q)
         if u.path == "/api/agents":
-            if who["kind"] != "owner":
+            if who["kind"] != "owner" or who.get("via"):
                 return self._send(403, {"error": "solo dalla pagina web"})
             with lock:
                 rows = db.execute("SELECT name, created, last_seen FROM agents ORDER BY name").fetchall()
@@ -315,13 +366,14 @@ class H(BaseHTTPRequestHandler):
         who = self._auth()
         if not who:
             return
-        if u.path != "/api/agents":
+        if u.path not in ("/api/agents", "/api/owner-tokens"):
             return self._send(404, {"error": "not found"})
-        if who["kind"] != "owner":
+        if who["kind"] != "owner" or who.get("via"):
             return self._send(403, {"error": "solo dalla pagina web"})
         name = q.get("name", [""])[0]
+        table, col = ("agents", "name") if u.path == "/api/agents" else ("owner_tokens", "label")
         with lock:
-            cur = db.execute("DELETE FROM agents WHERE name=?", (name,))
+            cur = db.execute(f"DELETE FROM {table} WHERE {col}=?", (name,))
             db.commit()
         self._send(200 if cur.rowcount else 404, {"deleted": bool(cur.rowcount)})
 
@@ -349,6 +401,10 @@ class H(BaseHTTPRequestHandler):
             return
         if u.path == "/api/agents":
             return self._new_agent(who)
+        if u.path == "/api/owner-tokens":
+            return self._new_owner_token(who)
+        if u.path == "/api/status":
+            return self._set_status(who)
         if u.path == "/api/aliases":
             return self._set_aliases(who)
         if u.path.startswith("/api/messages/") and u.path.endswith("/claim"):
@@ -384,8 +440,16 @@ class H(BaseHTTPRequestHandler):
         except Exception:
             return self._send(400, {"error": "body JSON richiesto: {text, room?, sender?, thread?, kind?, files?}"})
         declared = str(d.get("sender") or "").strip().lower()[:64]
+        human = 0
         if who["kind"] == "owner":
-            sender, verified = OWNER, 1
+            sender, verified, human = OWNER, 1, 1
+            # From an app with the owner token: the name chosen there, if it is free.
+            if who.get("via") and declared and declared != OWNER:
+                with lock:
+                    taken = agent_names() | set(aliases()) | EVERYONE
+                if not NAME.match(declared) or declared.split("/")[0] in taken:
+                    return self._send(403, {"error": f"il nome «{declared}» non è libero: è di un agente o non è valido"})
+                sender = declared
         elif who["kind"] == "agent":
             base = who["name"]
             sender = declared or base
@@ -405,21 +469,22 @@ class H(BaseHTTPRequestHandler):
             # Only one's own uploads, not yet in a message.
             files = []
             for f in file_ids:
+                owner_file = OWNER if human else sender.split("/")[0]
                 row = db.execute("SELECT id, name, type, size, sha256 FROM files WHERE id=? AND sender=? AND message IS NULL",
-                                 (f, sender.split("/")[0])).fetchone()
+                                 (f, owner_file)).fetchone()
                 if not row:
                     return self._send(400, {"error": "allegato inesistente o già usato"})
                 files.append(dict(zip(("id", "name", "type", "size", "sha256"), row)))
             ts = time.time()
             cur = db.execute(
-                "INSERT INTO messages(room, sender, text, ts, verified, thread, kind, files) VALUES(?,?,?,?,?,?,?,?)",
-                (room, sender, text, ts, verified, thread, kind, json.dumps(files) if files else None))
+                "INSERT INTO messages(room, sender, text, ts, verified, thread, kind, files, human) VALUES(?,?,?,?,?,?,?,?,?)",
+                (room, sender, text, ts, verified, thread, kind, json.dumps(files) if files else None, human))
             for f in files:
                 db.execute("UPDATE files SET message=? WHERE id=?", (cur.lastrowid, f["id"]))
             db.commit()
             cond.notify_all()
         self._send(201, {"id": cur.lastrowid, "room": room, "sender": sender, "text": text, "ts": ts,
-                         "verified": bool(verified), "thread": thread, "kind": kind, "files": files})
+                         "verified": bool(verified), "thread": thread, "kind": kind, "files": files, "human": bool(human)})
 
     def _new_file(self, who):
         """Un allegato: il corpo è il file, il nome in X-File-Name (codificato come URL)."""
@@ -659,9 +724,56 @@ class H(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def _set_status(self, who):
+        """Cosa fa un agente con un messaggio: in memoria, mai nello storico."""
+        if who["kind"] != "agent":
+            return self._send(403, {"error": "solo un agente con il suo token dice cosa sta facendo"})
+        try:
+            d = self._body()
+            mid = int(d["message"])
+            state = str(d["state"])
+            assert state in WORKING + ("done", "silent", "failed")
+        except Exception:
+            return self._send(400, {"error": "body JSON richiesto: {message, state, sender?, detail?}"})
+        by = self._declared(who, d)
+        detail = str(d.get("detail") or "")[:120]
+        now = time.time()
+        with lock:
+            if state in WORKING:
+                old = activity.get(by)
+                since = old["since"] if old and old["message"] == mid else now
+                activity[by] = {"message": mid, "state": state, "detail": detail, "since": since, "ts": now}
+            else:
+                old = activity.get(by)
+                if old and old["message"] == mid:
+                    activity.pop(by, None)
+                if state in ("silent", "failed"):
+                    o = outcomes.setdefault(mid, {})
+                    o[by] = state
+                    o["_ts"] = now
+        self._send(200, {"ok": True})
+
+    def _new_owner_token(self, who):
+        """Un token per scrivere come l'owner da un'app: si vede solo qui."""
+        if who["kind"] != "owner" or who.get("via"):
+            return self._send(403, {"error": "solo dalla pagina web"})
+        try:
+            label = str(self._body().get("label") or "").strip().lower()[:32]
+        except Exception:
+            label = ""
+        if not NAME.match(label):
+            return self._send(400, {"error": "nome del token non valido (es. easyisland-casa)"})
+        token = "ow_" + secrets.token_urlsafe(24)
+        with lock:
+            db.execute("INSERT INTO owner_tokens(label, token_hash, created) VALUES(?,?,?) "
+                       "ON CONFLICT(label) DO UPDATE SET token_hash=excluded.token_hash, created=excluded.created",
+                       (label, token_hash(token), time.time()))
+            db.commit()
+        self._send(201, {"label": label, "token": token})
+
     def _new_agent(self, who):
         """Crea un agente (o gli dà un token nuovo): il token si vede solo qui."""
-        if who["kind"] != "owner":
+        if who["kind"] != "owner" or who.get("via"):
             return self._send(403, {"error": "solo dalla pagina web"})
         try:
             name = str(self._body().get("name", "")).strip().lower()

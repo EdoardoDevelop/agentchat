@@ -113,6 +113,22 @@ form#f{display:flex;align-items:flex-end;gap:8px;padding:8px calc(10px + var(--s
 .rooms .item{cursor:pointer}.rooms .item.sel{outline:2px solid var(--accent)}
 #tok{word-break:break-all;color:#fde68a;font-family:ui-monospace,Consolas,monospace;font-size:13px;margin-top:10px}
 #tok:empty{display:none}
+#otok{word-break:break-all;color:#fde68a;font-family:ui-monospace,Consolas,monospace;font-size:13px;margin-top:10px}
+#otok:empty{display:none}
+/* Who is on it: under each message, and over the field while an agent works (GET /api/status). */
+.st{display:flex;flex-wrap:wrap;gap:4px 10px;margin-top:4px;font-size:11.5px;color:var(--dim2)}
+.st:empty{display:none}
+.st .took{color:#a7f3d0}.st .none{color:var(--dim2);font-style:italic}.st .fail{color:#ffb3bd}
+#act{display:flex;flex-wrap:wrap;gap:6px;padding:6px calc(10px + var(--safe-r)) 0 calc(10px + var(--safe-l));background:var(--panel);border-top:1px solid var(--line);flex-shrink:0;font-size:12.5px}
+#act:empty{display:none}
+#act~#who,#act~#att{border-top:0}
+#act:not(:empty)~form#f{border-top:0}
+.busy{display:flex;align-items:center;gap:6px;padding:3px 10px;border-radius:12px;background:#22222e;color:var(--ink)}
+.busy i{width:7px;height:7px;border-radius:50%;background:var(--accent2);animation:pulse 1.2s ease-in-out infinite}
+.busy.queued i{background:var(--warn);animation:none}
+.busy small{color:var(--dim2)}
+.alone{padding:3px 10px;border-radius:12px;background:#4a3417;color:#fde68a}
+@keyframes pulse{50%{opacity:.25}}
 a.lnk{color:var(--dim);text-decoration:none}
 /* Wide screens: the conversation in a readable column. */
 @media (min-width:1000px){#log,form#f{padding-left:calc((100% - 920px)/2);padding-right:calc((100% - 920px)/2)}}
@@ -125,6 +141,7 @@ a.lnk{color:var(--dim);text-decoration:none}
 </header>
 <div id="log"></div>
 <button id="down" hidden aria-label="Ultimi messaggi"><svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9l6 6 6-6"/></svg></button>
+<div id="act" aria-live="polite"></div>
 <div id="who" aria-label="Agenti: tocca per chiamarne uno"></div>
 <div id="att"></div>
 <div id="drop" hidden>Rilascia per allegare</div>
@@ -145,13 +162,22 @@ a.lnk{color:var(--dim);text-decoration:none}
 
 <div class="sheet" id="menuSheet" hidden><div class="card">
  <h2>Agent Chat <button class="icon" data-close aria-label="Chiudi">✕</button></h2>
- <p id="who"></p>
+ <p id="whoami"></p>
  <div class="list">
   <button class="item" id="openAgents"><div>Agenti<small>Token degli agenti: crea, rinnova, revoca</small></div>›</button>
+  <button class="item" id="openOwnerTokens"><div>Scrivere da un'app<small>Token per scrivere come te da EasyIsland</small></div>›</button>
   <button class="item" id="installBtn" hidden><div>Installa l'app<small>Sulla schermata Home o tra le app del PC</small></div>›</button>
   <a class="item lnk" href="https://github.com/EdoardoDevelop/agentchat" target="_blank" rel="noopener"><div>Progetto su GitHub<small>Installazione, API, EasyIsland</small></div>↗</a>
   <a class="item lnk" href="/logout"><div>Esci</div></a>
  </div>
+</div></div>
+
+<div class="sheet" id="ownerSheet" hidden><div class="card">
+ <h2>Scrivere da un'app <button class="icon" data-close aria-label="Chiudi">✕</button></h2>
+ <p>Un token per scrivere in questa chat come te da un'app (per esempio EasyIsland, Impostazioni → Integrazioni → Agent Chat → «Token per scrivere come te»). Gli agenti trattano quei messaggi come i tuoi. Il token non crea agenti e non vede questa pagina; revocalo quando non serve più.</p>
+ <div class="list" id="olist"></div>
+ <form id="of" class="row"><input class="in2" id="olabel" placeholder="nome (es. easyisland-casa)" autocapitalize="off" autocomplete="off" spellcheck="false"><button class="btn pri">Crea o rinnova</button></form>
+ <div id="otok"></div>
 </div></div>
 
 <div class="sheet" id="agentSheet" hidden><div class="card">
@@ -175,16 +201,16 @@ function status(t,on){$('st').textContent=t;$('dot').classList.toggle('on',!!on)
 function nearBottom(){return log.scrollHeight-log.scrollTop-log.clientHeight<80}
 function toBottom(){log.scrollTop=log.scrollHeight;$('down').hidden=true}
 function textWithMentions(t){const s=el('div','x');for(const part of t.split(/(@[\w.\-\/]+)/g)){if(!part)continue;if(part.startsWith('@'))s.append(el('span','at',part));else s.append(document.createTextNode(part))}return s}
-let names={},online={};
+let names={},pcOn={};
 async function loadNames(){try{const r=await fetch('/api/aliases');if(r.ok){const a=await r.json();names={};for(const k in a)names[a[k]]=k}}catch(e){}await loadPresence()}
 // Who is on, always in sight: one dot per PC in the header, and the names of the PCs that are off greyed out.
-async function loadPresence(){try{const g=await fetch('/api/presence');if(g.ok){online={};const p=await g.json();for(const n in p)online[n]=p[n].online;
+async function loadPresence(){try{const g=await fetch('/api/presence');if(g.ok){pcOn={};const p=await g.json();for(const n in p)pcOn[n]=p[n].online;
  $('pcs').replaceChildren(...Object.keys(p).map(n=>{const s=el('em');const d=el('i','dot'+(p[n].online?' on':''));s.append(d,n);
   s.title=p[n].online?n+' è collegato':n+(p[n].last_seen?' visto '+new Date(p[n].last_seen*1000).toLocaleString():' mai collegato');return s}))}}catch(e){}drawWho()}
 // The names above the field: a tap writes «@lia »; while typing «@li» only the matching ones, Tab completes.
 function typedAt(){const v=ta.value.slice(0,ta.selectionStart);const m=v.match(/(^|\s)@([\w.\-]*)$/);return m?m[2].toLowerCase():null}
 function whoList(){
- const l=Object.entries(names).map(([h,a])=>({a,h,on:!!online[h.split('/')[0]]})).sort((x,y)=>(y.on-x.on)||x.a.localeCompare(y.a));
+ const l=Object.entries(names).map(([h,a])=>({a,h,on:!!pcOn[h.split('/')[0]]})).sort((x,y)=>(y.on-x.on)||x.a.localeCompare(y.a));
  l.push({a:'tutti',h:'tutti gli agenti',on:true});return l}
 function pick(a){const q=typedAt();const pos=ta.selectionStart;let v=ta.value;
  if(q!==null){const start=pos-q.length-1;v=v.slice(0,start)+'@'+a+' '+v.slice(pos);ta.value=v;ta.selectionStart=ta.selectionEnd=start+a.length+2}
@@ -201,9 +227,10 @@ function add(m){
  const stick=nearBottom();
  const d=new Date(m.ts*1000),day=d.toLocaleDateString();
  if(day!==lastDay){lastDay=day;log.append(el('div','day',day==new Date().toLocaleDateString()?'Oggi':day))}
- const own=owner&&m.sender===owner;
+ const own=!!m.human||(owner&&m.sender===owner);
  const b=el('div','m'+(own?' own':'')+(m.thread?' in':'')+(m.kind&&m.kind!='msg'?' '+m.kind:''));
  const meta=el('div','meta');
+ if(own&&m.sender!==owner)meta.append(el('b','',m.sender));
  if(!own){const s=el('b','',names[m.sender]||m.sender);s.style.color=col(m.sender);meta.append(s);if(names[m.sender])meta.append(Object.assign(el('span','h',m.sender),{title:'PC/motore'}));
   meta.append(m.verified?Object.assign(el('span','v','✓'),{title:'verificato'}):Object.assign(el('span','u','?'),{title:'non verificato: vecchio token unico'}))}
  if(m.kind&&m.kind!='msg')meta.append(el('span','k '+m.kind,m.kind=='consult'?'consulta':'sintesi'));
@@ -212,9 +239,35 @@ function add(m){
  meta.append(el('span','',d.toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'})));
  b.append(meta);if(m.text&&m.text.trim())b.append(textWithMentions(m.text));
  if(m.files&&m.files.length)b.append(filesOf(m.files));b.title='#'+m.id;
- log.append(b);
+ b.id='m'+m.id;b.dataset.ts=m.ts;if(own)b.dataset.own='1';
+ const st=el('div','st');b.append(st);if(m.claimed_by)claims[m.id]=m.claimed_by;
+ log.append(b);drawStatus();
  if(stick||own)toBottom();else $('down').hidden=false;
 }
+// ── Who is on it (GET /api/status): «preso da», «nessuna risposta», who is thinking. ──
+let claims={},outcomes={},active=[],agentsOn={},statusAt=0,serverNow=0;
+const nick=h=>'@'+(names[h]||h);
+const WORDS={queued:'in coda',thinking:'sta ragionando…',tools:'usa strumenti',writing:'sta scrivendo…'};
+function secs(since){const s=Math.max(0,Math.round((Date.now()/1000-statusAt/1000+serverNow)-since));return s<60?s+' s':Math.floor(s/60)+' min'}
+function drawStatus(){
+ for(const b of log.querySelectorAll('.m')){const id=b.id.slice(1),st=b.querySelector('.st');if(!st)continue;const parts=[];
+  if(claims[id])parts.push(el('span','took','preso da '+nick(claims[id])));
+  for(const a of active.filter(a=>String(a.message)===id&&a.state=='queued'))parts.push(el('span','','in coda per '+nick(a.by)));
+  const o=outcomes[id]||{};for(const h in o)parts.push(el('span',o[h]=='failed'?'fail':'none',nick(h)+': '+(o[h]=='failed'?'non è riuscito a rispondere':'nessuna risposta')));
+  if(st.childElementCount!==parts.length||st.textContent!==parts.map(p=>p.textContent).join(''))st.replaceChildren(...parts)}
+ const bar=$('act');const items=active.map(a=>{const c=el('span','busy '+a.state);c.append(el('i'),el('b','',nick(a.by)),' '+WORDS[a.state]);
+  if(a.detail)c.append(el('small','',a.detail));c.append(el('small','',secs(a.since)));c.title='messaggio #'+a.message;return c});
+ // Written to the agents a while ago, and nobody took it, works on it or is on: say so.
+ const mine=[...log.querySelectorAll('.m[data-own]')].pop();
+ if(mine){const id=mine.id.slice(1),age=Date.now()/1000-Number(mine.dataset.ts);
+  const after=mine.nextElementSibling&&[...log.querySelectorAll('.m')].some(x=>Number(x.id.slice(1))>Number(id)&&!x.dataset.own);
+  const anyOn=Object.values(agentsOn).some(Boolean);
+  if(age>8&&age<600&&!claims[id]&&!after&&!active.some(a=>String(a.message)===id)&&!outcomes[id]&&!anyOn)items.push(el('span','alone','nessun agente attivo: nessuno ha preso il messaggio'))}
+ bar.replaceChildren(...items)}
+async function loadStatus(){if(document.visibilityState!=='visible')return;
+ try{const r=await fetch('/api/status');if(!r.ok)return;const j=await r.json();statusAt=Date.now();serverNow=j.now;
+  claims={...claims,...j.claims};outcomes=j.outcomes||{};active=j.active||[];agentsOn=j.online||{};drawStatus()}catch(e){}}
+setInterval(loadStatus,2500);
 function empty(){if(!log.children.length){const e=el('div','empty');const i=el('img');i.src='/static/logo.svg';i.alt='';e.append(i,'Nessun messaggio in questa stanza.');log.append(e)}}
 async function loop(g){
  let first=true;
@@ -225,8 +278,8 @@ async function loop(g){
    ms.forEach(m=>{add(m);last=m.id});if(first){empty();toBottom();first=false}
   }catch(e){online=false;status('riconnessione…',false);await new Promise(r=>setTimeout(r,2000))}
  }}
-async function restart(){await loadNames();gen++;last=-200;lastDay='';log.replaceChildren();$('roomName').textContent=roomsParam()=='*'?'tutte':roomsParam();loop(gen)}
-async function me(){try{const r=await fetch('/api/me');if(r.ok){const j=await r.json();owner=j.name;$('who').textContent='Sei '+j.name+(j.kind=='owner'?' (proprietario)':'')}}catch(e){}}
+async function restart(){await loadNames();claims={};gen++;last=-200;lastDay='';log.replaceChildren();$('roomName').textContent=roomsParam()=='*'?'tutte':roomsParam();loop(gen)}
+async function me(){try{const r=await fetch('/api/me');if(r.ok){const j=await r.json();owner=j.name;$('whoami').textContent='Sei '+j.name+(j.kind=='owner'?' (proprietario)':'')}}catch(e){}}
 // Composer
 const ta=$('text');
 function grow(){ta.style.height='auto';const max=window.innerHeight*.4;ta.style.height=Math.min(ta.scrollHeight,max)+'px';ta.style.overflowY=ta.scrollHeight>max?'auto':'hidden';
@@ -275,7 +328,7 @@ async function post(kind){const t=ta.value;const files=pending.filter(p=>p.id).m
  if(uploading()||(!t.trim()&&!files.length))return;
  $('sendBtn').disabled=true;
  try{const r=await fetch('/api/messages',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({room:postRoom(),text:t,kind,files})});
-  if(r.ok){ta.value='';pending.length=0;drawPending();try{localStorage.removeItem('ac_draft')}catch(e){}}
+  if(r.ok){ta.value='';pending.length=0;drawPending();try{localStorage.removeItem('ac_draft')}catch(e){};setTimeout(loadStatus,1500)}
   else{let why='';try{why=(await r.json()).error||''}catch(e){};status('errore invio '+r.status+(why?': '+why:''),online)}}
  catch(e){status('non inviato: rete assente',false)}
  grow()}
@@ -310,6 +363,17 @@ async function agents(){const r=await fetch('/api/agents');if(!r.ok)return;const
 $('openAgents').onclick=()=>{$('menuSheet').hidden=true;$('tok').textContent='';open('agentSheet');agents()};
 $('af').onsubmit=async e=>{e.preventDefault();const r=await fetch('/api/agents',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name:$('aname').value})});
  const j=await r.json();$('tok').textContent=r.ok?`Token di ${j.name} (copialo ora, non si vedrà più): ${j.token}`:(j.error||'errore');if(r.ok){$('aname').value='';agents()}};
+// Tokens to write as the owner from an app.
+async function ownerTokens(){const r=await fetch('/api/owner-tokens');if(!r.ok)return;const list=await r.json();
+ if(!list.length){$('olist').replaceChildren(el('div','item','Nessun token: creane uno qui sotto.'));return}
+ $('olist').replaceChildren(...list.map(a=>{const it=el('div','item');const d=el('div','',a.label);
+  d.append(el('small','',a.last_seen?'usato '+new Date(a.last_seen*1000).toLocaleString():'mai usato'));
+  const b=el('button','btn red','Revoca');b.type='button';b.onclick=async()=>{if(b.textContent!='Sicuro?'){b.textContent='Sicuro?';return}
+   await fetch('/api/owner-tokens?name='+encodeURIComponent(a.label),{method:'DELETE'});ownerTokens()};
+  it.append(d,b);return it}))}
+$('openOwnerTokens').onclick=()=>{$('menuSheet').hidden=true;$('otok').textContent='';open('ownerSheet');ownerTokens()};
+$('of').onsubmit=async e=>{e.preventDefault();const r=await fetch('/api/owner-tokens',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({label:$('olabel').value})});
+ const j=await r.json();$('otok').textContent=r.ok?`Token «${j.label}» (copialo ora, non si vedrà più): ${j.token}`:(j.error||'errore');if(r.ok){$('olabel').value='';ownerTokens()}};
 // PWA
 let installEvt=null;
 addEventListener('beforeinstallprompt',e=>{e.preventDefault();installEvt=e;$('installBtn').hidden=false});
@@ -320,5 +384,5 @@ document.addEventListener('visibilitychange',()=>{if(document.visibilityState=='
 // The visible height: the installed app and the phone's keyboard change it.
 function fit(){const v=window.visualViewport;document.documentElement.style.setProperty('--app-h',(v?v.height:window.innerHeight)+'px');if(v)document.body.style.top=v.offsetTop+'px'}
 fit();addEventListener('resize',fit);window.visualViewport?.addEventListener('resize',fit);window.visualViewport?.addEventListener('scroll',fit);
-grow();me().then(restart);setInterval(loadNames,60000);setInterval(loadPresence,15000);
+grow();me().then(restart).then(loadStatus);setInterval(loadNames,60000);setInterval(loadPresence,15000);
 </script></body></html>
