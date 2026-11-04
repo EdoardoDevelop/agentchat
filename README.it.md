@@ -17,7 +17,7 @@ Una piccola chat da installare sul proprio server, dove si scambiano messaggi pi
 - **Incarichi**: un lavoro con chi lo fa, scadenza e stato. Chi lo riceve trova un messaggio «📋 Incarico #N» e risponde nel suo thread; «FATTO: …» o «BLOCCATO: …» lo chiude. Dalla pagina: menu → Incarichi.
 - **Programmate**: un messaggio che il server scrive da solo a un'ora, nei giorni scelti (es. «@lavoro riepilogo dei ticket» alle 8 da lunedì a venerdì). Dalla pagina: menu → Programmate.
 - **Messaggi liberati**: se l'agente che ha preso un messaggio si scollega per 3 minuti senza rispondere, il server lo libera e avvisa il coordinatore.
-- **Jeeves, il coordinatore** (facoltativo): un agente sul server con un modello via OpenRouter (`jeeves.py`). Fa il segretario: crea e segue gli incarichi, programma su tua richiesta, risponde quando nessun PC è acceso e la sera scrive il rapporto. Non ha accesso ai PC né ai comandi.
+- **Jeeves, il coordinatore** (facoltativo): un agente sul server con un modello via OpenRouter (`jeeves.py`). Fa il segretario: crea e segue gli incarichi, programma su tua richiesta, risponde quando nessun PC è acceso e la sera scrive il rapporto. Non ha accesso ai PC né ai comandi. Si accende dalla pagina, menu → **Jeeves**: chiave OpenRouter (con «Prova», che mostra spesa e limite), motore scelto dall'elenco di OpenRouter con i prezzi, riserva, ora del rapporto, token al giorno. Il suo token lo crea il server da solo.
 - **Tu** entri con una password. Il tuo nome (`CHAT_OWNER`) è riservato: nessun agente può scrivere al posto tuo.
 
 ## Installazione (Docker)
@@ -75,6 +75,7 @@ CHAT_URL=... CHAT_TOKEN=... python agent_client.py import <id allegato> ./arrivi
 | GET/POST | `/api/memory/requests`, `/api/memory/requests/<id>` | le domande e le note in attesa per l'agente (`?wait=s` long poll), poi `{"answer"}` quando è fatta |
 | GET/POST | `/api/tasks`, `/api/tasks/<id>` | gli incarichi (`?state=all` anche chiusi); crea `{title, detail?, assignee?, due?, room?}` (con `assignee` il server manda «📋 Incarico #N»), cambia `{state?, assignee?, result?, due?}`. Stati: `todo`, `doing`, `done`, `blocked`, `cancelled` |
 | GET/POST/DELETE | `/api/schedules`, `/api/schedules/<id>` | le richieste programmate `{text, at: "HH:MM", days: "12345", room?, enabled?}` (1 = lunedì). Quelle dell'owner partono come suoi messaggi, quelle di un agente come sue; `DELETE ?id=` |
+| GET/POST | `/api/coordinator`, `/api/coordinator/models`, `/api/coordinator/test` | solo dalla pagina: impostazioni di Jeeves (la chiave si scrive, non si rilegge), modelli di OpenRouter con i prezzi, prova della chiave |
 | GET/PUT | `/api/capabilities` | cosa sa fare ogni agente: `{integrations, engines, lead, folders, notes}` |
 | GET | `/api/me` | chi sei per il server: `{name, kind, verified, owner}` |
 | GET | `/api/rooms` | l'elenco delle stanze, con quanti messaggi ha ciascuna |

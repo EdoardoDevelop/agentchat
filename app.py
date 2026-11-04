@@ -34,6 +34,7 @@ coordinatore (jeeves.py, un agente con un modello via OpenRouter).
 """
 import hashlib, hmac, json, os, re, secrets, sqlite3, threading, time
 from urllib.parse import quote, unquote
+import urllib.error, urllib.request
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from urllib.parse import urlparse, parse_qs
 
@@ -181,6 +182,8 @@ db.execute("""CREATE TABLE IF NOT EXISTS schedules(
   created REAL NOT NULL, last_run TEXT)""")
 # Claims let go because their agent went away without answering (once per message).
 db.execute("CREATE TABLE IF NOT EXISTS released(message INTEGER PRIMARY KEY, by TEXT NOT NULL, ts REAL NOT NULL)")
+# The server's own settings, changed from the page (the coordinator's model and key…).
+db.execute("CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY, value TEXT NOT NULL)")
 db.commit()
 lock = threading.Lock()
 cond = threading.Condition(lock)
@@ -383,6 +386,75 @@ def release_claims(now=None):
     return let_go
 
 
+# ── The coordinator's settings ───────────────────────────────────────────────
+# Chosen in the page (menu → Jeeves) by the owner and read by jeeves.py. The OpenRouter key
+# is kept here, in the database (data/, readable only by root on the server): the page only
+# learns whether it is set, the coordinator alone reads it.
+COORD_DEFAULTS = {"on": "0", "model": "anthropic/claude-haiku-5.5", "fallback": "openai/gpt-6-luna",
+                  "report_at": "19:00", "daily_tokens": "2000000", "key": ""}
+OPENROUTER = os.environ.get("OPENROUTER_BASE", "https://openrouter.ai/api/v1")
+# The coordinator's token: made by the server at start and left in data/ for jeeves.py
+# (same volume), so nobody has to copy it anywhere.
+COORD_TOKEN_FILE = os.path.join(os.path.dirname(os.path.abspath(DB)), "jeeves.token")
+coord_status = {}      # what jeeves.py last said about itself (POST /api/coordinator/status)
+_models = {"at": 0, "list": []}
+
+
+def setting(key, default=""):
+    row = db.execute("SELECT value FROM settings WHERE key=?", (key,)).fetchone()
+    return row[0] if row else default
+
+
+def coord_config(with_key=False):
+    c = {k: setting("coord_" + k, v) for k, v in COORD_DEFAULTS.items()}
+    out = {"on": c["on"] == "1", "model": c["model"], "fallback": c["fallback"], "report_at": c["report_at"],
+           "daily_tokens": int(c["daily_tokens"] or 0), "has_key": bool(c["key"]), "name": COORDINATOR}
+    if with_key:
+        out["key"] = c["key"]
+    return out
+
+
+def coord_token():
+    """A new token for the coordinator at each start, in data/jeeves.token (0600)."""
+    token = "ac_" + secrets.token_urlsafe(24)
+    db.execute("INSERT INTO agents(name, token_hash, created) VALUES(?,?,?) ON CONFLICT(name) DO UPDATE SET "
+               "token_hash=excluded.token_hash, created=excluded.created", (COORDINATOR, token_hash(token), time.time()))
+    db.commit()
+    fd = os.open(COORD_TOKEN_FILE + ".tmp", os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w") as f:
+        f.write(token)
+    os.replace(COORD_TOKEN_FILE + ".tmp", COORD_TOKEN_FILE)
+
+
+def openrouter(path, key=None, timeout=20):
+    headers = {"Authorization": f"Bearer {key}"} if key else {}
+    req = urllib.request.Request(OPENROUTER + path, headers=headers)
+    with urllib.request.urlopen(req, timeout=timeout) as r:
+        return json.loads(r.read())
+
+
+def models_list():
+    """OpenRouter's models that use tools, with their prices per million tokens (cached 1 h)."""
+    if time.time() - _models["at"] < 3600 and _models["list"]:
+        return _models["list"]
+    out = []
+    for m in openrouter("/models", timeout=30).get("data", []):
+        if "tools" not in (m.get("supported_parameters") or []):
+            continue
+        p = m.get("pricing") or {}
+        try:
+            pin, pout = float(p.get("prompt") or 0) * 1e6, float(p.get("completion") or 0) * 1e6
+        except ValueError:
+            continue
+        if pin < 0 or pout < 0:
+            continue
+        out.append({"id": m["id"], "name": m.get("name") or m["id"], "in": round(pin, 4), "out": round(pout, 4),
+                    "context": m.get("context_length"), "created": m.get("created") or 0})
+    out.sort(key=lambda x: x["id"])
+    _models.update(at=time.time(), list=out)
+    return out
+
+
 def ticker():
     """Every 20 s: scheduled requests and claims let go."""
     while True:
@@ -527,6 +599,21 @@ class H(BaseHTTPRequestHandler):
         if u.path == "/api/status":
             with lock:
                 return self._send(200, status_now())
+        if u.path == "/api/coordinator":
+            mine = who["kind"] == "agent" and who["name"] == COORDINATOR
+            if not (mine or self._page_owner(who)):
+                return self._send(403, {"error": "solo dalla pagina web o dal coordinatore"})
+            with lock:
+                out = coord_config(with_key=mine)
+            out["status"] = coord_status
+            return self._send(200, out)
+        if u.path == "/api/coordinator/models":
+            if not self._page_owner(who):
+                return self._send(403, {"error": "solo dalla pagina web"})
+            try:
+                return self._send(200, models_list())
+            except Exception as e:
+                return self._send(502, {"error": f"OpenRouter non risponde: {e}"})
         if u.path == "/api/capabilities":
             with lock:
                 rows = db.execute("SELECT agent, ts, data FROM capabilities ORDER BY agent").fetchall()
@@ -567,6 +654,8 @@ class H(BaseHTTPRequestHandler):
         if who["kind"] != "owner" or who.get("via"):
             return self._send(403, {"error": "solo dalla pagina web"})
         name = q.get("name", [""])[0]
+        if u.path == "/api/agents" and name == COORDINATOR:
+            return self._send(400, {"error": f"«{COORDINATOR}» è il coordinatore: si spegne da menu → Jeeves"})
         table, col = ("agents", "name") if u.path == "/api/agents" else ("owner_tokens", "label")
         with lock:
             cur = db.execute(f"DELETE FROM {table} WHERE {col}=?", (name,))
@@ -611,6 +700,20 @@ class H(BaseHTTPRequestHandler):
             return self._set_status(who)
         if u.path == "/api/aliases":
             return self._set_aliases(who)
+        if u.path == "/api/coordinator":
+            return self._set_coordinator(who)
+        if u.path == "/api/coordinator/test":
+            return self._test_coordinator(who)
+        if u.path == "/api/coordinator/status":
+            if who["kind"] != "agent" or who["name"] != COORDINATOR:
+                return self._send(403, {"error": "solo il coordinatore"})
+            try:
+                d = self._body()
+                coord_status.clear()
+                coord_status.update({k: d[k] for k in ("state", "error", "tokens_today", "model", "last_turn") if k in d}, ts=time.time())
+            except Exception:
+                return self._send(400, {"error": "body JSON richiesto"})
+            return self._send(200, {"ok": True})
         if u.path == "/api/tasks":
             return self._new_task(who)
         if u.path.startswith("/api/tasks/") and u.path[len("/api/tasks/"):].isdigit():
@@ -938,6 +1041,70 @@ class H(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    # The coordinator
+
+    @staticmethod
+    def _page_owner(who):
+        """The owner in the page (not an app with an owner token)."""
+        return who["kind"] == "owner" and not who.get("via")
+
+    def _set_coordinator(self, who):
+        """{on?, model?, fallback?, report_at?, daily_tokens?, key?}: "" as key removes it."""
+        if not self._page_owner(who):
+            return self._send(403, {"error": "solo dalla pagina web"})
+        try:
+            d = self._body()
+            changes = {}
+            if "on" in d:
+                changes["on"] = "1" if d["on"] else "0"
+            for k in ("model", "fallback"):
+                if k in d:
+                    v = str(d[k] or "").strip()[:120]
+                    assert k == "fallback" or v
+                    assert not v or re.match(r"^[A-Za-z0-9._:/-]+$", v)
+                    changes[k] = v
+            if "report_at" in d:
+                v = str(d["report_at"] or "").strip()
+                assert v == "" or TIME.match(v)
+                changes["report_at"] = v
+            if "daily_tokens" in d:
+                changes["daily_tokens"] = str(max(0, min(int(d["daily_tokens"]), 100_000_000)))
+            if "key" in d:
+                v = str(d["key"] or "").strip()
+                assert len(v) < 300 and all(c.isprintable() and not c.isspace() for c in v)
+                changes["key"] = v
+        except Exception:
+            return self._send(400, {"error": "valori non validi"})
+        with lock:
+            for k, v in changes.items():
+                db.execute("INSERT INTO settings(key, value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                           ("coord_" + k, v))
+            db.commit()
+            out = coord_config()
+        out["status"] = coord_status
+        self._send(200, out)
+
+    def _test_coordinator(self, who):
+        """Checks the OpenRouter key (the one given, or the saved one): its credit and limit."""
+        if not self._page_owner(who):
+            return self._send(403, {"error": "solo dalla pagina web"})
+        try:
+            key = str(self._body().get("key") or "").strip()
+        except Exception:
+            key = ""
+        with lock:
+            key = key or coord_config(with_key=True)["key"]
+        if not key:
+            return self._send(400, {"error": "nessuna chiave"})
+        try:
+            data = openrouter("/key", key).get("data") or {}
+        except urllib.error.HTTPError as e:
+            return self._send(200, {"ok": False, "error": "chiave rifiutata" if e.code in (401, 403) else f"OpenRouter: HTTP {e.code}"})
+        except Exception as e:
+            return self._send(200, {"ok": False, "error": f"OpenRouter non risponde: {e}"})
+        self._send(200, {"ok": True, "label": data.get("label"), "usage": data.get("usage"), "limit": data.get("limit"),
+                         "limit_remaining": data.get("limit_remaining"), "free_tier": data.get("is_free_tier")})
+
     # Capabilities, assignments, scheduled requests
 
     def _put_capabilities(self, who):
@@ -1167,6 +1334,8 @@ class H(BaseHTTPRequestHandler):
             name = str(self._body().get("name", "")).strip().lower()
         except Exception:
             name = ""
+        if name == COORDINATOR:
+            return self._send(400, {"error": f"«{COORDINATOR}» è il coordinatore: il suo token lo crea il server"})
         if not NAME.match(name) or name == OWNER or name in EVERYONE or name == SYSTEM:
             return self._send(400, {"error": "nome: lettere minuscole, cifre, . _ - (max 32), diverso dal tuo"})
         with lock:
@@ -1185,5 +1354,6 @@ class H(BaseHTTPRequestHandler):
 
 
 if __name__ == "__main__":
+    coord_token()
     threading.Thread(target=ticker, daemon=True).start()
     ThreadingHTTPServer(("0.0.0.0", int(os.environ.get("PORT", "8000"))), H).serve_forever()

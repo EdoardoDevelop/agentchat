@@ -1,6 +1,7 @@
 """Jeeves - il coordinatore di Agent Chat, sulla VPS. Solo stdlib.
 
-Un agente come gli altri (token personale «jeeves»), con un modello via OpenRouter. Fa il
+Un agente come gli altri («jeeves», token creato dal server in data/jeeves.token), con un
+modello via OpenRouter scelto nella pagina (menu → Jeeves, dove si mette anche la chiave). Fa il
 segretario, non il capo: ai messaggi normali dell'owner rispondono gli EasyIsland accesi.
 Jeeves si sveglia solo quando:
 - qualcuno lo nomina (@jeeves), anche il server quando libera un messaggio di un PC spento;
@@ -15,14 +16,13 @@ non può fare nulla. Le programmate le crea o cambia solo su richiesta dell'owne
 import json, os, re, time, urllib.error, urllib.parse, urllib.request
 
 CHAT = os.environ.get("CHAT_URL", "http://agentchat:8000").rstrip("/")
-TOKEN = os.environ.get("JEEVES_TOKEN", "")
-KEY = os.environ.get("OPENROUTER_API_KEY", "")
+# The token: the server makes it at each start in data/jeeves.token (same volume).
+TOKEN_FILE = os.environ.get("JEEVES_TOKEN_FILE", "/data/jeeves.token")
+TOKEN = ""
 API = os.environ.get("OPENROUTER_URL", "https://openrouter.ai/api/v1/chat/completions")
-MODEL = os.environ.get("JEEVES_MODEL", "anthropic/claude-haiku-5.5")
-FALLBACK = os.environ.get("JEEVES_FALLBACK", "openai/gpt-6-luna")
-REPORT_AT = os.environ.get("JEEVES_REPORT_AT", "19:00")
-DAILY_TOKENS = int(os.environ.get("JEEVES_DAILY_TOKENS", "2000000"))
 STATE = os.environ.get("JEEVES_STATE", "/data/jeeves.json")
+# Chosen in the page (menu → Jeeves) and read from the server at every round.
+CONF = {"on": False, "key": "", "model": "anthropic/claude-haiku-5.5", "fallback": "", "report_at": "19:00", "daily_tokens": 2000000}
 MAX_STEPS = 8
 MENTION = re.compile(r"@([a-z0-9][a-z0-9._/-]{0,63})", re.I)
 EVERYONE = {"tutti", "all", "everyone"}
@@ -53,6 +53,34 @@ def save_state(s):
 
 
 # ── The chat ─────────────────────────────────────────────────────────────────
+
+def read_token():
+    global TOKEN
+    try:
+        with open(TOKEN_FILE, encoding="utf-8") as f:
+            TOKEN = f.read().strip()
+    except OSError:
+        TOKEN = ""
+    return TOKEN
+
+
+def refresh_config():
+    """The settings of the page; False when the server does not answer."""
+    c = chat("GET", "/api/coordinator")
+    if not isinstance(c, dict) or "error" in c:
+        if isinstance(c, dict) and c.get("status") == 401:
+            read_token()   # the server started again with a new token
+        return False
+    CONF.update({k: c[k] for k in CONF if k in c})
+    return True
+
+
+def report_status(state, error=""):
+    chat("POST", "/api/coordinator/status", {
+        "state": "spento" if not CONF["on"] else ("senza chiave" if not CONF["key"] else "in ascolto"),
+        "error": error, "tokens_today": state.get("tokens", 0) if state.get("budget_day") == today() else 0,
+        "model": CONF["model"], "last_turn": state.get("last_turn")})
+
 
 def chat(method, path, body=None, timeout=30):
     data = json.dumps(body).encode() if body is not None else None
@@ -190,25 +218,30 @@ Regole:
 
 def ask_model(messages, owner_asked, state):
     """A turn with tools; back the final text (or "")."""
-    if not KEY:
-        log("manca OPENROUTER_API_KEY")
+    if not CONF["key"]:
         return ""
     for _ in range(MAX_STEPS):
         if over_budget(state):
             return ""
-        body = {"models": [MODEL, FALLBACK], "messages": messages, "tools": TOOLS, "max_tokens": 1500}
+        models = [m for m in (CONF["model"], CONF["fallback"]) if m]
+        body = {"models": models, "messages": messages, "tools": TOOLS, "max_tokens": 1500}
         req = urllib.request.Request(API, data=json.dumps(body).encode(),
-                                     headers={"Authorization": f"Bearer {KEY}", "Content-Type": "application/json",
+                                     headers={"Authorization": f"Bearer {CONF['key']}", "Content-Type": "application/json",
                                               "X-Title": "Agent Chat - Jeeves"})
         try:
             with urllib.request.urlopen(req, timeout=120) as r:
                 out = json.loads(r.read())
         except urllib.error.HTTPError as e:
-            log("openrouter:", e.code, e.read()[:300])
+            detail = e.read()[:300].decode(errors="replace")
+            log("openrouter:", e.code, detail)
+            state["error"] = f"OpenRouter HTTP {e.code}: {detail[:160]}"
             return ""
         except Exception as e:
             log("openrouter:", e)
+            state["error"] = f"OpenRouter non risponde: {e}"
             return ""
+        state["error"] = ""
+        state["last_turn"] = time.time()
         use = out.get("usage") or {}
         spend(state, int(use.get("prompt_tokens") or 0) + int(use.get("completion_tokens") or 0))
         msg = ((out.get("choices") or [{}])[0]).get("message") or {}
@@ -243,11 +276,12 @@ def spend(state, n):
 
 
 def over_budget(state):
-    if state.get("budget_day") != today() or state.get("tokens", 0) < DAILY_TOKENS:
+    limit = int(CONF["daily_tokens"] or 0)
+    if not limit or state.get("budget_day") != today() or state.get("tokens", 0) < limit:
         return False
     if not state.get("budget_warned"):
         state["budget_warned"] = True
-        post(f"@{OWNER} ho finito i token di oggi ({DAILY_TOKENS}): riprendo domani.")
+        post(f"@{OWNER} ho finito i token di oggi ({limit}): riprendo domani.")
     return True
 
 
@@ -326,8 +360,9 @@ def remind(state):
 
 
 def report(state):
-    """The evening report, once a day at REPORT_AT."""
-    if time.strftime("%H:%M") < REPORT_AT or state.get("report_day") == today():
+    """The evening report, once a day at the time chosen in the page."""
+    at = CONF["report_at"]
+    if not at or time.strftime("%H:%M") < at or state.get("report_day") == today():
         return
     state["report_day"] = today()
     start = time.mktime(time.strptime(today(), "%Y-%m-%d"))
@@ -346,35 +381,39 @@ def report(state):
 
 def main():
     global OWNER
-    if not TOKEN:
-        # Not set up yet: wait quietly instead of restarting over and over.
-        log("manca JEEVES_TOKEN: Jeeves resta spento")
-        while True:
-            time.sleep(3600)
-    me = chat("GET", "/api/me")
-    if not isinstance(me, dict) or me.get("name") != ME:
-        raise SystemExit(f"il token non è di «{ME}»: {me}")
+    # The server writes the token when it starts: wait for it, never give up.
+    while True:
+        read_token()
+        me = chat("GET", "/api/me") if TOKEN else None
+        if isinstance(me, dict) and me.get("name") == ME:
+            break
+        time.sleep(5)
     OWNER = me.get("owner") or OWNER
     state = load_state()
     if not state.get("last"):
         last = chat("GET", "/api/messages?rooms=*&after=-1&limit=1") or []
         state["last"] = last[-1]["id"] if isinstance(last, list) and last else 0
-    log(f"Jeeves in ascolto (modello {MODEL}, dopo il #{state['last']})")
+    log(f"Jeeves collegato (dopo il #{state['last']})")
     while True:
         try:
+            refresh_config()
+            report_status(state, state.get("error", ""))
             msgs = chat("GET", f"/api/messages?rooms=*&after={state['last']}&wait=50&limit=50", timeout=70)
             if isinstance(msgs, dict):
                 log("chat:", msgs.get("error"))
                 time.sleep(10)
                 msgs = []
-            online = online_agents() if msgs else set()
+            active = CONF["on"] and bool(CONF["key"])
+            online = online_agents() if msgs and active else set()
             for m in msgs:
                 state["last"] = max(state["last"], m["id"])
-                if wants(m, online):
+                # Off or without a key: it only keeps up with the chat.
+                if active and wants(m, online):
                     log("rispondo al", m["id"])
                     turn(m, state)
-            remind(state)
-            report(state)
+            if active:
+                remind(state)
+                report(state)
             save_state(state)
         except Exception as e:
             log("errore:", e)

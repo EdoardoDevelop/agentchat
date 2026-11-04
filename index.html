@@ -142,6 +142,9 @@ textarea.in2{resize:vertical;font:inherit;font-size:15px}
 .days label{display:grid;place-items:center;width:30px;height:30px;border-radius:50%;background:#2a2a3a;font-size:12px;cursor:pointer}
 .days input{display:none}.days label:has(input:checked){background:var(--accent);color:#fff}
 .off{opacity:.5}
+.lbl{font-size:13px;color:var(--dim);margin-top:6px}.lbl small{color:var(--dim2)}
+.hint{font-size:12.5px;color:var(--dim2)}.hint:empty{display:none}.hint.ok{color:#a7f3d0}.hint.bad{color:#ffb3bd}
+#coordState div{font-size:13.5px}#coordState small{margin-top:2px}
 /* Wide screens: the conversation in a readable column. */
 @media (min-width:1000px){#log,form#f{padding-left:calc((100% - 920px)/2);padding-right:calc((100% - 920px)/2)}}
 </style></head><body>
@@ -176,6 +179,7 @@ textarea.in2{resize:vertical;font:inherit;font-size:15px}
  <h2>Agent Chat <button class="icon" data-close aria-label="Chiudi">✕</button></h2>
  <p id="whoami"></p>
  <div class="list">
+  <button class="item" id="openCoord"><div>Jeeves, il coordinatore<small id="coordSub">Motore, chiave OpenRouter, rapporto della sera</small></div>›</button>
   <button class="item" id="openTasks"><div>Incarichi<small>Chi fa cosa, entro quando, a che punto</small></div>›</button>
   <button class="item" id="openSchedules"><div>Programmate<small>Richieste che partono da sole a un'ora</small></div>›</button>
   <button class="item" id="openAgents"><div>Agenti<small>Token degli agenti: crea, rinnova, revoca</small></div>›</button>
@@ -192,6 +196,30 @@ textarea.in2{resize:vertical;font:inherit;font-size:15px}
  <div class="list" id="olist"></div>
  <form id="of" class="row"><input class="in2" id="olabel" placeholder="nome (es. easyisland-casa)" autocapitalize="off" autocomplete="off" spellcheck="false"><button class="btn pri">Crea o rinnova</button></form>
  <div id="otok"></div>
+</div></div>
+
+<div class="sheet" id="coordSheet" hidden><div class="card">
+ <h2>Jeeves, il coordinatore <button class="icon" data-close aria-label="Chiudi">✕</button></h2>
+ <p>Un agente che gira sul server con un modello via OpenRouter. Fa il segretario: crea e segue gli incarichi, programma su tua richiesta, risponde quando nessun PC è acceso e la sera scrive il rapporto. Non ha accesso ai PC né ai comandi. Lo chiami con @jeeves.</p>
+ <div class="item" id="coordState"><div>…</div></div>
+ <div class="col">
+  <label class="chk"><input type="checkbox" id="con"> Acceso</label>
+  <label class="lbl">Chiave OpenRouter <small>(openrouter.ai → Keys; meglio una chiave solo per Jeeves, con un limite di spesa)</small></label>
+  <div class="row"><input class="in2" id="ckey" type="password" autocomplete="off" spellcheck="false" placeholder="sk-or-…">
+   <button type="button" class="btn" id="ctest">Prova</button><button type="button" class="btn red" id="cdel" hidden>Togli</button></div>
+  <div class="hint" id="ckeyInfo"></div>
+  <label class="lbl">Motore <small id="cmodelInfo"></small></label>
+  <input class="in2" id="cmodel" list="modelList" autocomplete="off" spellcheck="false" placeholder="anthropic/claude-haiku-5.5">
+  <label class="lbl">Riserva, se il motore non risponde <small>(facoltativa)</small></label>
+  <input class="in2" id="cfall" list="modelList" autocomplete="off" spellcheck="false" placeholder="openai/gpt-6-luna">
+  <datalist id="modelList"></datalist>
+  <div class="row">
+   <label class="lbl" style="flex:1">Rapporto della sera alle<input class="in2" id="creport" type="time" style="display:block;margin-top:4px;width:100%"></label>
+   <label class="lbl" style="flex:1">Token al giorno, al massimo<input class="in2" id="ccap" type="number" min="0" step="100000" style="display:block;margin-top:4px;width:100%"></label>
+  </div>
+  <button type="button" class="btn pri" id="csave">Salva</button>
+ </div>
+ <div class="err" id="cerr"></div>
 </div></div>
 
 <div class="sheet" id="taskSheet" hidden><div class="card">
@@ -417,6 +445,35 @@ async function ownerTokens(){const r=await fetch('/api/owner-tokens');if(!r.ok)r
 $('openOwnerTokens').onclick=()=>{$('menuSheet').hidden=true;$('otok').textContent='';open('ownerSheet');ownerTokens()};
 $('of').onsubmit=async e=>{e.preventDefault();const r=await fetch('/api/owner-tokens',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({label:$('olabel').value})});
  const j=await r.json();$('otok').textContent=r.ok?`Token «${j.label}» (copialo ora, non si vedrà più): ${j.token}`:(j.error||'errore');if(r.ok){$('olabel').value='';ownerTokens()}};
+// The coordinator (Jeeves): settings kept on the server; the key is only ever sent, never shown.
+let models=[];
+const usd=n=>n==null?'—':'$'+(+n).toFixed(n<1?3:2);
+const modelText=id=>{const m=models.find(x=>x.id==id);return m?`${usd(m.in)} / ${usd(m.out)} per milione di token (entrata / uscita)`:''};
+function coordShow(c){$('con').checked=c.on;$('cmodel').value=c.model||'';$('cfall').value=c.fallback||'';$('creport').value=c.report_at||'';$('ccap').value=c.daily_tokens||0;
+ $('ckey').value='';$('ckey').placeholder=c.has_key?'impostata ✓ (scrivine una nuova per cambiarla)':'sk-or-…';$('cdel').hidden=!c.has_key;
+ $('cmodelInfo').textContent=modelText(c.model);
+ const s=c.status||{},fresh=s.ts&&Date.now()/1000-s.ts<120;
+ const st=!c.on?'Spento':!c.has_key?'Manca la chiave OpenRouter':fresh?'In ascolto':'Non risponde (il servizio «jeeves» è acceso?)';
+ const d=el('div','',st);if(fresh&&c.on)d.append(el('small','',`${s.model||c.model} · ${(s.tokens_today||0).toLocaleString()} token oggi`+(s.last_turn?' · ultimo turno '+new Date(s.last_turn*1000).toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'}):'')));
+ if(s.error)d.append(el('small','late',s.error));$('coordState').replaceChildren(d);
+ $('coordSub').textContent=c.on&&c.has_key?'Acceso · '+(c.model||''):'Spento'}
+async function coord(){const r=await fetch('/api/coordinator');if(!r.ok){$('cerr').textContent='Solo dalla pagina, come proprietario.';return}coordShow(await r.json())}
+async function loadModels(){if(models.length)return;try{const r=await fetch('/api/coordinator/models');if(!r.ok)return;models=await r.json();
+ $('modelList').replaceChildren(...models.map(m=>{const o=el('option');o.value=m.id;o.label=`${m.name} · ${usd(m.in)} / ${usd(m.out)}`;return o}));
+ $('cmodelInfo').textContent=modelText($('cmodel').value)}catch(e){}}
+$('cmodel').oninput=()=>$('cmodelInfo').textContent=modelText($('cmodel').value);
+$('openCoord').onclick=()=>{$('menuSheet').hidden=true;$('cerr').textContent='';$('ckeyInfo').textContent='';open('coordSheet');coord();loadModels()};
+async function coordSave(b){const r=await fetch('/api/coordinator',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(b)});
+ const j=await r.json();if(r.ok){$('cerr').textContent='';coordShow(j)}else $('cerr').textContent=j.error||'errore';return r.ok}
+$('csave').onclick=async()=>{const b={on:$('con').checked,model:$('cmodel').value.trim(),fallback:$('cfall').value.trim(),report_at:$('creport').value,daily_tokens:+$('ccap').value||0};
+ const k=$('ckey').value.trim();if(k)b.key=k;
+ if(b.on&&!k&&$('cdel').hidden){$('cerr').textContent='Per accenderlo serve la chiave OpenRouter.';return}
+ if(await coordSave(b)){$('ckeyInfo').className='hint ok';$('ckeyInfo').textContent='Salvato.'}};
+$('ctest').onclick=async()=>{const info=$('ckeyInfo');info.className='hint';info.textContent='Provo…';
+ const r=await fetch('/api/coordinator/test',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({key:$('ckey').value.trim()})});
+ const j=await r.json();if(!r.ok||!j.ok){info.className='hint bad';info.textContent=j.error||'errore';return}
+ info.className='hint ok';info.textContent='Chiave valida'+(j.label?' («'+j.label+'»)':'')+` · spesi ${usd(j.usage)}`+(j.limit!=null?` di ${usd(j.limit)}`:' · nessun limite di spesa: conviene metterne uno su OpenRouter')};
+$('cdel').onclick=async()=>{if($('cdel').textContent!='Sicuro?'){$('cdel').textContent='Sicuro?';return}$('cdel').textContent='Togli';await coordSave({key:'',on:false})};
 // Assignments
 const STATES={todo:'da fare',doing:'in corso',done:'fatto',blocked:'bloccato',cancelled:'annullato'};
 const day=s=>s?new Date(s*1000).toLocaleDateString([],{day:'2-digit',month:'2-digit'}):'';
