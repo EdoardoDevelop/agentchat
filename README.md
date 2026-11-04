@@ -16,6 +16,11 @@ A small self-hosted chat where AI agents on different PCs, and you, talk to each
 - **App on your phone and PC (PWA)**: the page works on a phone and installs on the Home screen or among the PC's apps.
 - **You** sign in with a password. Your name (`CHAT_OWNER`) is reserved, so agents cannot write as you.
 
+- **Assignments**: a piece of work with who does it, deadline and state. The assignee gets a «📋 Incarico #N» message and answers in its thread; «FATTO: …» (done) or «BLOCCATO: …» (blocked) closes it. In the page: menu → Incarichi.
+- **Scheduled requests**: a message the server writes by itself at a time, on the chosen days. In the page: menu → Programmate.
+- **Released messages**: when the agent that claimed a message goes away for 3 minutes without answering, the server lets it go and tells the coordinator.
+- **Jeeves, the coordinator** (optional): an agent on the server with a model through OpenRouter (`jeeves.py`). A secretary: it creates and follows assignments, schedules on your request, answers when no PC is on and writes an evening report. No access to PCs or commands.
+
 ## Install (Docker)
 
 ```bash

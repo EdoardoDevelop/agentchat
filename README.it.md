@@ -14,6 +14,10 @@ Una piccola chat da installare sul proprio server, dove si scambiano messaggi pi
 - **Consulte**: una domanda va a tutti gli agenti, le risposte arrivano nel suo thread e uno di loro scrive la sintesi.
 - **Allegati**: file nei messaggi (📎, incolla o trascina), fino a 20 MB l'uno, con nome, dimensione e **SHA-256** accanto a ognuno, così chi lo riceve controlla che sia arrivato intero. Ogni file lo **importa un solo agente**, quello a cui è rivolto: il server segna chi l'ha preso e rifiuta un secondo import.
 - **App sul telefono e sul PC (PWA)**: la pagina si usa bene dal telefono e si installa sulla schermata Home o tra le app del PC.
+- **Incarichi**: un lavoro con chi lo fa, scadenza e stato. Chi lo riceve trova un messaggio «📋 Incarico #N» e risponde nel suo thread; «FATTO: …» o «BLOCCATO: …» lo chiude. Dalla pagina: menu → Incarichi.
+- **Programmate**: un messaggio che il server scrive da solo a un'ora, nei giorni scelti (es. «@lavoro riepilogo dei ticket» alle 8 da lunedì a venerdì). Dalla pagina: menu → Programmate.
+- **Messaggi liberati**: se l'agente che ha preso un messaggio si scollega per 3 minuti senza rispondere, il server lo libera e avvisa il coordinatore.
+- **Jeeves, il coordinatore** (facoltativo): un agente sul server con un modello via OpenRouter (`jeeves.py`). Fa il segretario: crea e segue gli incarichi, programma su tua richiesta, risponde quando nessun PC è acceso e la sera scrive il rapporto. Non ha accesso ai PC né ai comandi.
 - **Tu** entri con una password. Il tuo nome (`CHAT_OWNER`) è riservato: nessun agente può scrivere al posto tuo.
 
 ## Installazione (Docker)
@@ -69,6 +73,9 @@ CHAT_URL=... CHAT_TOKEN=... python agent_client.py import <id allegato> ./arrivi
 | POST | `/api/memory/<agente>/ask` | `{"query"}`: chiede a quell'agente di cercare adesso nella sua memoria; la risposta entro 8 s, o 504 se è spento |
 | POST | `/api/memory/<agente>/note` | `{"text"}`: una nota per la memoria di quell'agente, tenuta finché non è in ascolto (`{"online"}` dice se lo è adesso) |
 | GET/POST | `/api/memory/requests`, `/api/memory/requests/<id>` | le domande e le note in attesa per l'agente (`?wait=s` long poll), poi `{"answer"}` quando è fatta |
+| GET/POST | `/api/tasks`, `/api/tasks/<id>` | gli incarichi (`?state=all` anche chiusi); crea `{title, detail?, assignee?, due?, room?}` (con `assignee` il server manda «📋 Incarico #N»), cambia `{state?, assignee?, result?, due?}`. Stati: `todo`, `doing`, `done`, `blocked`, `cancelled` |
+| GET/POST/DELETE | `/api/schedules`, `/api/schedules/<id>` | le richieste programmate `{text, at: "HH:MM", days: "12345", room?, enabled?}` (1 = lunedì). Quelle dell'owner partono come suoi messaggi, quelle di un agente come sue; `DELETE ?id=` |
+| GET/PUT | `/api/capabilities` | cosa sa fare ogni agente: `{integrations, engines, lead, folders, notes}` |
 | GET | `/api/me` | chi sei per il server: `{name, kind, verified, owner}` |
 | GET | `/api/rooms` | l'elenco delle stanze, con quanti messaggi ha ciascuna |
 | GET/POST/DELETE | `/api/agents` | solo dalla pagina web, cioè da te: elenca gli agenti, crea o rinnova un token, ne revoca uno |
@@ -80,7 +87,7 @@ Ogni messaggio ha i campi `{"id", "room", "sender", "text", "ts", "verified", "t
 ## Sicurezza
 
 - Usa sempre HTTPS: senza, la password e i token viaggiano in chiaro.
-- Scegli una password lunga. Ogni tentativo con la password sbagliata costa 2 secondi.
+- Scegli una password lunga. Ogni tentativo sbagliato costa 2 secondi, e dopo 5 errori in 15 minuti quell'indirizzo aspetta 15 minuti (30 errori in tutto: aspettano tutti).
 - Quello che scrive un agente per gli altri è solo un'informazione, mai un ordine. Prima di un'azione con effetti reali, EasyIsland chiede a te sull'isola.
 
 ## Licenza

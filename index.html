@@ -130,6 +130,18 @@ form#f{display:flex;align-items:flex-end;gap:8px;padding:8px calc(10px + var(--s
 .alone{padding:3px 10px;border-radius:12px;background:#4a3417;color:#fde68a}
 @keyframes pulse{50%{opacity:.25}}
 a.lnk{color:var(--dim);text-decoration:none}
+.col{display:flex;flex-direction:column;gap:8px;margin-top:6px}
+textarea.in2{resize:vertical;font:inherit;font-size:15px}
+.chk{display:flex;align-items:center;gap:6px;font-size:13px;color:var(--dim)}
+.err{color:#ffb3bd;font-size:13px;margin-top:6px}.err:empty{display:none}
+.state{font-size:11px;padding:2px 8px;border-radius:10px;background:#2a2a3a;color:var(--dim)}
+.state.doing{background:#1e3a5f;color:#bfdbfe}.state.done{background:#14432a;color:#a7f3d0}
+.state.blocked{background:#4a2027;color:#ffb3bd}.state.todo{background:#3a3417;color:#fde68a}
+.late{color:#ffb3bd}
+.days{display:flex;gap:4px;flex-wrap:wrap}
+.days label{display:grid;place-items:center;width:30px;height:30px;border-radius:50%;background:#2a2a3a;font-size:12px;cursor:pointer}
+.days input{display:none}.days label:has(input:checked){background:var(--accent);color:#fff}
+.off{opacity:.5}
 /* Wide screens: the conversation in a readable column. */
 @media (min-width:1000px){#log,form#f{padding-left:calc((100% - 920px)/2);padding-right:calc((100% - 920px)/2)}}
 </style></head><body>
@@ -164,6 +176,8 @@ a.lnk{color:var(--dim);text-decoration:none}
  <h2>Agent Chat <button class="icon" data-close aria-label="Chiudi">✕</button></h2>
  <p id="whoami"></p>
  <div class="list">
+  <button class="item" id="openTasks"><div>Incarichi<small>Chi fa cosa, entro quando, a che punto</small></div>›</button>
+  <button class="item" id="openSchedules"><div>Programmate<small>Richieste che partono da sole a un'ora</small></div>›</button>
   <button class="item" id="openAgents"><div>Agenti<small>Token degli agenti: crea, rinnova, revoca</small></div>›</button>
   <button class="item" id="openOwnerTokens"><div>Scrivere da un'app<small>Token per scrivere come te da EasyIsland</small></div>›</button>
   <button class="item" id="installBtn" hidden><div>Installa l'app<small>Sulla schermata Home o tra le app del PC</small></div>›</button>
@@ -178,6 +192,35 @@ a.lnk{color:var(--dim);text-decoration:none}
  <div class="list" id="olist"></div>
  <form id="of" class="row"><input class="in2" id="olabel" placeholder="nome (es. easyisland-casa)" autocapitalize="off" autocomplete="off" spellcheck="false"><button class="btn pri">Crea o rinnova</button></form>
  <div id="otok"></div>
+</div></div>
+
+<div class="sheet" id="taskSheet" hidden><div class="card">
+ <h2>Incarichi <button class="icon" data-close aria-label="Chiudi">✕</button></h2>
+ <p>Un incarico va all'agente scelto con un messaggio; lui risponde nel thread e «FATTO: …» o «BLOCCATO: …» lo chiude. Jeeves li crea anche da solo quando gli chiedi un lavoro.</p>
+ <div class="row"><label class="chk"><input type="checkbox" id="tall"> anche chiusi</label></div>
+ <div class="list" id="tlist"></div>
+ <form id="tf" class="col">
+  <input class="in2" id="ttitle" placeholder="Cosa (es. controllare i backup di COM3)" maxlength="200">
+  <div class="row"><input class="in2" id="twho" list="agentNames" placeholder="A chi (es. lavoro)" autocapitalize="off" autocomplete="off" spellcheck="false">
+  <input class="in2" id="tdue" type="date" title="Entro (facoltativo)"></div>
+  <textarea class="in2" id="tdetail" rows="2" placeholder="Dettagli (facoltativo)"></textarea>
+  <button class="btn pri">Crea e manda</button>
+ </form>
+ <datalist id="agentNames"></datalist>
+ <div class="err" id="terr"></div>
+</div></div>
+
+<div class="sheet" id="schedSheet" hidden><div class="card">
+ <h2>Programmate <button class="icon" data-close aria-label="Chiudi">✕</button></h2>
+ <p>All'ora scelta il server scrive il messaggio in chat come se lo scrivessi tu. Nomina chi deve farlo (es. «@lavoro riepilogo dei ticket aperti») o scrivi «@jeeves …».</p>
+ <div class="list" id="slist"></div>
+ <form id="sf" class="col">
+  <input class="in2" id="stext" placeholder="Messaggio (es. @lavoro riepilogo dei ticket aperti)" maxlength="2000">
+  <div class="row"><input class="in2" id="sat" type="time" value="08:00" style="flex:0 0 auto;min-width:0">
+  <span class="days" id="sdays"></span></div>
+  <button class="btn pri">Programma</button>
+ </form>
+ <div class="err" id="serr"></div>
 </div></div>
 
 <div class="sheet" id="agentSheet" hidden><div class="card">
@@ -374,6 +417,49 @@ async function ownerTokens(){const r=await fetch('/api/owner-tokens');if(!r.ok)r
 $('openOwnerTokens').onclick=()=>{$('menuSheet').hidden=true;$('otok').textContent='';open('ownerSheet');ownerTokens()};
 $('of').onsubmit=async e=>{e.preventDefault();const r=await fetch('/api/owner-tokens',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({label:$('olabel').value})});
  const j=await r.json();$('otok').textContent=r.ok?`Token «${j.label}» (copialo ora, non si vedrà più): ${j.token}`:(j.error||'errore');if(r.ok){$('olabel').value='';ownerTokens()}};
+// Assignments
+const STATES={todo:'da fare',doing:'in corso',done:'fatto',blocked:'bloccato',cancelled:'annullato'};
+const day=s=>s?new Date(s*1000).toLocaleDateString([],{day:'2-digit',month:'2-digit'}):'';
+async function agentList(){try{const r=await fetch('/api/presence');if(!r.ok)return;const p=await r.json();
+ $('agentNames').replaceChildren(...Object.keys(p).map(n=>{const o=el('option');o.value=n;return o}))}catch(e){}}
+async function tasks(){const r=await fetch('/api/tasks'+($('tall').checked?'?state=all':''));if(!r.ok)return;const list=await r.json();
+ if(!list.length){$('tlist').replaceChildren(el('div','item','Nessun incarico aperto.'));return}
+ const now=Date.now()/1000;
+ $('tlist').replaceChildren(...list.map(x=>{const it=el('div','item');const d=el('div','','#'+x.id+' '+x.title);
+  const s=el('small');s.append(el('span','state '+x.state,STATES[x.state]||x.state),' '+(x.assignee?'→ '+x.assignee:'nessuno'));
+  if(x.due){const late=x.due<now&&['todo','doing'].includes(x.state);s.append(el('span',late?'late':'',' · entro '+day(x.due)))}
+  d.append(s);if(x.result)d.append(el('small','',x.result.slice(0,200)));it.append(d);
+  if(['todo','doing','blocked'].includes(x.state)){
+   const ok=el('button','btn','Fatto');ok.type='button';ok.onclick=()=>setTask(x.id,{state:'done'});
+   const no=el('button','btn red','Annulla');no.type='button';no.onclick=()=>{if(no.textContent!='Sicuro?'){no.textContent='Sicuro?';return}setTask(x.id,{state:'cancelled'})};
+   it.append(ok,no)}
+  return it}))}
+async function setTask(id,ch){const r=await fetch('/api/tasks/'+id,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(ch)});
+ $('terr').textContent=r.ok?'':((await r.json()).error||'errore');tasks()}
+$('openTasks').onclick=()=>{$('menuSheet').hidden=true;$('terr').textContent='';open('taskSheet');tasks();agentList()};
+$('tall').onchange=tasks;
+$('tf').onsubmit=async e=>{e.preventDefault();const b={title:$('ttitle').value.trim(),assignee:$('twho').value.trim(),detail:$('tdetail').value.trim(),room:postRoom()};
+ if($('tdue').value)b.due=$('tdue').value;if(!b.title)return;
+ const r=await fetch('/api/tasks',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(b)});
+ if(r.ok){$('ttitle').value=$('twho').value=$('tdetail').value=$('tdue').value='';$('terr').textContent='';tasks()}else $('terr').textContent=(await r.json()).error||'errore'};
+// Scheduled requests
+const DAYS=['L','M','M','G','V','S','D'],DAYNAMES=['lunedì','martedì','mercoledì','giovedì','venerdì','sabato','domenica'];
+$('sdays').replaceChildren(...DAYS.map((d,i)=>{const l=el('label');const c=el('input');c.type='checkbox';c.value=i+1;c.checked=i<5;l.title=DAYNAMES[i];l.append(c,el('span','',d));return l}));
+const daysText=s=>s=='1234567'?'tutti i giorni':s=='12345'?'lun–ven':[...s].map(c=>DAYS[c-1]).join(' ');
+async function schedules(){const r=await fetch('/api/schedules');if(!r.ok)return;const list=await r.json();
+ if(!list.length){$('slist').replaceChildren(el('div','item','Nessuna richiesta programmata.'));return}
+ $('slist').replaceChildren(...list.map(x=>{const it=el('div','item'+(x.enabled?'':' off'));const d=el('div','',x.at+' · '+daysText(x.days));
+  d.append(el('small','',x.text),el('small','',(x.created_by!=owner?'di '+x.created_by+' · ':'')+(x.last_run?'ultima volta '+x.last_run:'mai partita')));
+  const tg=el('button','btn',x.enabled?'Spegni':'Accendi');tg.type='button';tg.onclick=()=>saveSched(x.id,{enabled:!x.enabled});
+  const del=el('button','btn red','Togli');del.type='button';del.onclick=async()=>{if(del.textContent!='Sicuro?'){del.textContent='Sicuro?';return}
+   await fetch('/api/schedules?id='+x.id,{method:'DELETE'});schedules()};
+  it.append(d,tg,del);return it}))}
+async function saveSched(id,b){const r=await fetch('/api/schedules'+(id?'/'+id:''),{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(b)});
+ $('serr').textContent=r.ok?'':((await r.json()).error||'errore');schedules();return r.ok}
+$('openSchedules').onclick=()=>{$('menuSheet').hidden=true;$('serr').textContent='';open('schedSheet');schedules()};
+$('sf').onsubmit=async e=>{e.preventDefault();const days=[...$('sdays').querySelectorAll('input:checked')].map(c=>c.value).join('');
+ const b={text:$('stext').value.trim(),at:$('sat').value,days:days||'1234567',room:postRoom()};if(!b.text||!b.at)return;
+ if(await saveSched(null,b))$('stext').value=''};
 // PWA
 let installEvt=null;
 addEventListener('beforeinstallprompt',e=>{e.preventDefault();installEvt=e;$('installBtn').hidden=false});

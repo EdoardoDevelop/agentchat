@@ -25,6 +25,12 @@ copia (GET /api/memory/<agente>), la interrogano dal vivo se è acceso
 (POST /api/memory/<agente>/ask, risposta entro pochi secondi o 504) e gli lasciano note
 (POST /api/memory/<agente>/note), che lui applica appena è in ascolto
 (GET /api/memory/requests, POST /api/memory/requests/<id>).
+Incarichi (/api/tasks): un lavoro con chi lo fa, scadenza e stato; con un assegnatario il server
+scrive «📋 Incarico #N» e le risposte nel suo thread lo fanno avanzare («FATTO:», «BLOCCATO:»).
+Programmate (/api/schedules): il server scrive un messaggio a un'ora, nei giorni scelti.
+Capacità (/api/capabilities): cosa sa fare ogni agente. Un messaggio preso da un agente che si
+scollega senza rispondere torna libero dopo 3 minuti, con un messaggio di «sistema» al
+coordinatore (jeeves.py, un agente con un modello via OpenRouter).
 """
 import hashlib, hmac, json, os, re, secrets, sqlite3, threading, time
 from urllib.parse import quote, unquote
@@ -157,6 +163,24 @@ db.execute("""CREATE TABLE IF NOT EXISTS agents(
   name TEXT PRIMARY KEY, token_hash TEXT NOT NULL UNIQUE, created REAL NOT NULL, last_seen REAL)""")
 db.execute("""CREATE TABLE IF NOT EXISTS owner_tokens(
   label TEXT PRIMARY KEY, token_hash TEXT NOT NULL UNIQUE, created REAL NOT NULL, last_seen REAL)""")
+# What each agent can do (its integrations, engines, folders), as it says itself.
+db.execute("""CREATE TABLE IF NOT EXISTS capabilities(
+  agent TEXT PRIMARY KEY, ts REAL NOT NULL, data TEXT NOT NULL)""")
+# Assignments: a piece of work with who does it, its state and its result. «message» is
+# the chat message that hands it out: the replies in its thread are its progress.
+db.execute("""CREATE TABLE IF NOT EXISTS tasks(
+  id INTEGER PRIMARY KEY AUTOINCREMENT, title TEXT NOT NULL, detail TEXT NOT NULL DEFAULT '',
+  assignee TEXT, state TEXT NOT NULL DEFAULT 'todo', due REAL, created_by TEXT NOT NULL,
+  created REAL NOT NULL, updated REAL NOT NULL, result TEXT, message INTEGER, room TEXT NOT NULL DEFAULT 'general',
+  reminded REAL)""")
+# Scheduled requests: the server writes «text» at «at» (HH:MM, local time) on «days»
+# (1 = Monday … 7 = Sunday). By the owner they are the owner's messages; by an agent, its own.
+db.execute("""CREATE TABLE IF NOT EXISTS schedules(
+  id INTEGER PRIMARY KEY AUTOINCREMENT, text TEXT NOT NULL, at TEXT NOT NULL, days TEXT NOT NULL DEFAULT '1234567',
+  room TEXT NOT NULL DEFAULT 'general', enabled INTEGER NOT NULL DEFAULT 1, created_by TEXT NOT NULL,
+  created REAL NOT NULL, last_run TEXT)""")
+# Claims let go because their agent went away without answering (once per message).
+db.execute("CREATE TABLE IF NOT EXISTS released(message INTEGER PRIMARY KEY, by TEXT NOT NULL, ts REAL NOT NULL)")
 db.commit()
 lock = threading.Lock()
 cond = threading.Condition(lock)
@@ -175,6 +199,14 @@ WORKING = ("queued", "thinking", "tools", "writing")
 outcomes = {}
 OUTCOME_SECS = 1800
 EVERYONE = {"tutti", "all", "everyone"}
+# The server's own messages (claims let go). Never an agent's or the owner's name.
+SYSTEM = "sistema"
+# The coordinator agent (jeeves.py): told when a claim is let go.
+COORDINATOR = os.environ.get("CHAT_COORDINATOR", "jeeves").strip().lower()
+TASK_STATES = ("todo", "doing", "done", "blocked", "cancelled")
+TIME = re.compile(r"^([01]\d|2[0-3]):[0-5]\d$")
+# A claim whose agent is gone this long without a word in the thread is let go.
+RELEASE_SECS = 180
 
 
 def rows_to_msgs(rows):
@@ -258,6 +290,111 @@ def status_now():
         "online": {n: p["online"] for n, p in presence().items()},
         "now": now,
     }
+
+
+TASK_FIELDS = ("id", "title", "detail", "assignee", "state", "due", "created_by", "created", "updated", "result", "message", "room")
+SCHEDULE_FIELDS = ("id", "text", "at", "days", "room", "enabled", "created_by", "created", "last_run")
+
+
+def tasks_list(open_only):
+    sql = "SELECT %s FROM tasks" % ", ".join(TASK_FIELDS)
+    if open_only:
+        sql += " WHERE state IN ('todo','doing','blocked')"
+    sql += " ORDER BY id DESC LIMIT 500"
+    return [dict(zip(TASK_FIELDS, r)) for r in db.execute(sql).fetchall()]
+
+
+def schedules_list():
+    rows = db.execute("SELECT %s FROM schedules ORDER BY at, id" % ", ".join(SCHEDULE_FIELDS)).fetchall()
+    out = [dict(zip(SCHEDULE_FIELDS, r)) for r in rows]
+    for s in out:
+        s["enabled"] = bool(s["enabled"])
+    return out
+
+
+def insert_message(room, sender, text, verified, thread=None, kind="msg", human=0):
+    """A message written by the server itself (scheduled requests, claims let go).
+    The caller holds «cond» and notifies."""
+    cur = db.execute("INSERT INTO messages(room, sender, text, ts, verified, thread, kind, human) VALUES(?,?,?,?,?,?,?,?)",
+                     (room, sender, text, time.time(), verified, thread, kind, human))
+    return cur.lastrowid
+
+
+def task_progress(thread, sender, text):
+    """A reply in the thread of an assignment moves it: «FATTO…» done, «BLOCCATO…» blocked,
+    anything else by whoever does it = in progress. The caller holds the lock."""
+    row = db.execute("SELECT id, assignee, state FROM tasks WHERE message=?", (thread,)).fetchone()
+    if not row:
+        return
+    tid, assignee, state = row
+    head = text.lstrip().upper()
+    who = sender.split("/")[0]
+    mine = assignee and (assignee == sender or assignee.split("/")[0] == who)
+    if head.startswith("FATTO"):
+        db.execute("UPDATE tasks SET state='done', result=?, updated=? WHERE id=?", (text.strip()[:4000], time.time(), tid))
+    elif head.startswith("BLOCCATO"):
+        db.execute("UPDATE tasks SET state='blocked', result=?, updated=? WHERE id=?", (text.strip()[:4000], time.time(), tid))
+    elif mine and state == "todo":
+        db.execute("UPDATE tasks SET state='doing', updated=? WHERE id=?", (time.time(), tid))
+
+
+def run_schedules(now=None):
+    """The scheduled requests due this minute, each once a day."""
+    t = time.localtime(now)
+    hhmm, day, today = time.strftime("%H:%M", t), str(t.tm_wday + 1), time.strftime("%Y-%m-%d", t)
+    fired = 0
+    for sid, text, days, room, by, last in db.execute(
+            "SELECT id, text, days, room, created_by, last_run FROM schedules WHERE enabled=1 AND at=?", (hhmm,)).fetchall():
+        if day not in days or last == today:
+            continue
+        mine = by == OWNER
+        insert_message(room, by, "⏰ " + text, 1, human=1 if mine else 0)
+        db.execute("UPDATE schedules SET last_run=? WHERE id=?", (today, sid))
+        fired += 1
+    return fired
+
+
+def release_claims(now=None):
+    """Claims of agents gone away without a word in the thread go back, with a message
+    for the coordinator (once per message, only for the last day)."""
+    now = now or time.time()
+    online = {n for n, s in db.execute("SELECT name, last_seen FROM agents").fetchall()
+              if listening.get(n, 0) > 0 or now - (s or 0) < ONLINE_SECS}
+    let_go = 0
+    rows = db.execute("SELECT c.message, c.by, c.ts, m.room FROM claims c JOIN messages m ON m.id=c.message "
+                      "WHERE c.ts<? AND c.ts>? AND c.message NOT IN (SELECT message FROM released)",
+                      (now - RELEASE_SECS, now - 86400)).fetchall()
+    for mid, by, ts, room in rows:
+        base = by.split("/")[0]
+        if base in online:
+            continue
+        seen = db.execute("SELECT last_seen FROM agents WHERE name=?", (base,)).fetchone()
+        if seen and seen[0] and now - seen[0] < RELEASE_SECS:
+            continue
+        said = db.execute("SELECT 1 FROM messages WHERE thread=? AND (sender=? OR sender LIKE ?) AND ts>=?",
+                          (mid, base, base + "/%", ts)).fetchone()
+        if said:
+            continue
+        db.execute("DELETE FROM claims WHERE message=?", (mid,))
+        db.execute("INSERT OR IGNORE INTO released(message, by, ts) VALUES(?,?,?)", (mid, by, now))
+        insert_message(room, SYSTEM, f"↻ @{COORDINATOR} il messaggio #{mid} era stato preso da {by}, che si è scollegato "
+                                     "senza rispondere: è di nuovo libero.", 1, thread=mid)
+        let_go += 1
+    return let_go
+
+
+def ticker():
+    """Every 20 s: scheduled requests and claims let go."""
+    while True:
+        time.sleep(20)
+        try:
+            with cond:
+                n = run_schedules() + release_claims()
+                if n:
+                    db.commit()
+                    cond.notify_all()
+        except Exception as e:  # never stop the server for this
+            print("ticker:", e, flush=True)
 
 
 class Listening:
@@ -390,6 +527,16 @@ class H(BaseHTTPRequestHandler):
         if u.path == "/api/status":
             with lock:
                 return self._send(200, status_now())
+        if u.path == "/api/capabilities":
+            with lock:
+                rows = db.execute("SELECT agent, ts, data FROM capabilities ORDER BY agent").fetchall()
+            return self._send(200, {a: dict(json.loads(d), ts=ts) for a, ts, d in rows})
+        if u.path == "/api/tasks":
+            with lock:
+                return self._send(200, tasks_list(q.get("state", ["open"])[0] != "all"))
+        if u.path == "/api/schedules":
+            with lock:
+                return self._send(200, schedules_list())
         if u.path == "/api/owner-tokens":
             if who["kind"] != "owner" or who.get("via"):
                 return self._send(403, {"error": "solo dalla pagina web"})
@@ -413,6 +560,8 @@ class H(BaseHTTPRequestHandler):
         who = self._auth()
         if not who:
             return
+        if u.path == "/api/schedules":
+            return self._delete_schedule(who, q.get("id", [""])[0])
         if u.path not in ("/api/agents", "/api/owner-tokens"):
             return self._send(404, {"error": "not found"})
         if who["kind"] != "owner" or who.get("via"):
@@ -429,6 +578,8 @@ class H(BaseHTTPRequestHandler):
         who = self._auth()
         if not who:
             return
+        if u.path == "/api/capabilities":
+            return self._put_capabilities(who)
         if u.path != "/api/memory":
             return self._send(404, {"error": "not found"})
         return self._put_memory(who)
@@ -460,6 +611,14 @@ class H(BaseHTTPRequestHandler):
             return self._set_status(who)
         if u.path == "/api/aliases":
             return self._set_aliases(who)
+        if u.path == "/api/tasks":
+            return self._new_task(who)
+        if u.path.startswith("/api/tasks/") and u.path[len("/api/tasks/"):].isdigit():
+            return self._update_task(who, int(u.path[len("/api/tasks/"):]))
+        if u.path == "/api/schedules":
+            return self._save_schedule(who, None)
+        if u.path.startswith("/api/schedules/") and u.path[len("/api/schedules/"):].isdigit():
+            return self._save_schedule(who, int(u.path[len("/api/schedules/"):]))
         if u.path.startswith("/api/messages/") and u.path.endswith("/claim"):
             mid = u.path[len("/api/messages/"):-len("/claim")]
             if not mid.isdigit():
@@ -499,7 +658,7 @@ class H(BaseHTTPRequestHandler):
             # From an app with the owner token: the name chosen there, if it is free.
             if who.get("via") and declared and declared != OWNER:
                 with lock:
-                    taken = agent_names() | set(aliases()) | EVERYONE
+                    taken = agent_names() | set(aliases()) | EVERYONE | {SYSTEM}
                 if not NAME.match(declared) or declared.split("/")[0] in taken:
                     return self._send(403, {"error": f"il nome «{declared}» non è libero: è di un agente o non è valido"})
                 sender = declared
@@ -534,6 +693,8 @@ class H(BaseHTTPRequestHandler):
                 (room, sender, text, ts, verified, thread, kind, json.dumps(files) if files else None, human))
             for f in files:
                 db.execute("UPDATE files SET message=? WHERE id=?", (cur.lastrowid, f["id"]))
+            if thread is not None and verified:
+                task_progress(thread, sender, text)
             db.commit()
             cond.notify_all()
         self._send(201, {"id": cur.lastrowid, "room": room, "sender": sender, "text": text, "ts": ts,
@@ -600,7 +761,7 @@ class H(BaseHTTPRequestHandler):
         base = who["name"]
         refused = {}
         with lock:
-            reserved = agent_names() | {OWNER} | EVERYONE
+            reserved = agent_names() | {OWNER} | EVERYONE | {SYSTEM}
             for handle, alias in list(wanted.items())[:20]:
                 handle = str(handle).strip().lower()
                 alias = str(alias or "").strip().lower().lstrip("@")
@@ -777,6 +938,180 @@ class H(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    # Capabilities, assignments, scheduled requests
+
+    def _put_capabilities(self, who):
+        """{"integrations": [...], "engines": [...], "folders": [...], "notes": "…"}: what the agent can do."""
+        if who["kind"] != "agent":
+            return self._send(403, {"error": "solo un agente con il suo token dice cosa sa fare"})
+        try:
+            d = self._body()
+            assert isinstance(d, dict)
+            data = {k: d[k] for k in ("integrations", "engines", "folders", "notes", "lead") if k in d}
+            raw = json.dumps(data, ensure_ascii=False)
+            assert len(raw) < 20000
+        except Exception:
+            return self._send(400, {"error": "body JSON richiesto: {integrations?, engines?, folders?, notes?, lead?}"})
+        with lock:
+            db.execute("INSERT INTO capabilities(agent, ts, data) VALUES(?,?,?) ON CONFLICT(agent) DO UPDATE SET "
+                       "ts=excluded.ts, data=excluded.data", (who["name"], time.time(), raw))
+            db.commit()
+        self._send(200, {"ok": True})
+
+    def _author(self, who, body):
+        """Who writes: (name, human). Legacy tokens may not."""
+        if who["kind"] == "owner":
+            return OWNER, 1
+        if who["kind"] == "agent":
+            return self._declared(who, body), 0
+        return None, 0
+
+    @staticmethod
+    def _due(v):
+        """A deadline: seconds, «2026-11-07», «2026-11-07 18:00» or «2026-11-07T18:00» (local time)."""
+        if v in (None, ""):
+            return None
+        if isinstance(v, (int, float)):
+            return float(v)
+        s = str(v).strip().replace("T", " ")[:16]
+        for fmt in ("%Y-%m-%d %H:%M", "%Y-%m-%d"):
+            try:
+                t = time.strptime(s, fmt)
+                return time.mktime(t) + (0 if " " in s else 18 * 3600)
+            except ValueError:
+                pass
+        raise ValueError("scadenza non valida")
+
+    def _hand_out(self, task, author, human):
+        """The assignment's message for whoever does it; its thread is the assignment's progress."""
+        when = time.strftime("%d/%m/%Y %H:%M", time.localtime(task["due"])) if task["due"] else ""
+        text = (f"@{task['assignee']} 📋 Incarico #{task['id']}: {task['title']}"
+                + (f"\n{task['detail']}" if task["detail"] else "")
+                + (f"\nScadenza: {when}" if when else "")
+                + "\nRispondi in questo thread; «FATTO: …» o «BLOCCATO: …» lo chiude.")
+        mid = insert_message(task["room"], author, text, 1, human=human)
+        db.execute("UPDATE tasks SET message=? WHERE id=?", (mid, task["id"]))
+        return mid
+
+    def _new_task(self, who):
+        try:
+            d = self._body()
+            title = str(d["title"]).strip()[:200]
+            detail = str(d.get("detail") or "").strip()[:4000]
+            assignee = str(d.get("assignee") or "").strip().lower().lstrip("@")[:64] or None
+            room = str(d.get("room") or "general").strip()[:64]
+            due = self._due(d.get("due"))
+            assert title and (assignee is None or NAME.match(assignee.replace("/", "")[:32] or "x"))
+        except Exception:
+            return self._send(400, {"error": "body JSON richiesto: {title, detail?, assignee?, due?, room?}"})
+        author, human = self._author(who, d)
+        if not author:
+            return self._send(403, {"error": "serve un token personale"})
+        now = time.time()
+        with cond:
+            cur = db.execute("INSERT INTO tasks(title, detail, assignee, state, due, created_by, created, updated, room) "
+                             "VALUES(?,?,?,?,?,?,?,?,?)", (title, detail, assignee, "todo", due, author, now, now, room))
+            task = {"id": cur.lastrowid, "title": title, "detail": detail, "assignee": assignee, "due": due, "room": room}
+            if assignee:
+                self._hand_out(task, author, human)
+            db.commit()
+            cond.notify_all()
+            out = dict(zip(TASK_FIELDS, db.execute("SELECT %s FROM tasks WHERE id=?" % ", ".join(TASK_FIELDS), (task["id"],)).fetchone()))
+        self._send(201, out)
+
+    def _update_task(self, who, tid):
+        """{state?, assignee?, result?, due?, title?, detail?}: a new assignee gets the message."""
+        try:
+            d = self._body()
+            changes = {}
+            if "state" in d:
+                assert d["state"] in TASK_STATES
+                changes["state"] = d["state"]
+            for k, n in (("title", 200), ("detail", 4000), ("result", 4000)):
+                if k in d:
+                    changes[k] = str(d[k] or "").strip()[:n]
+            if "due" in d:
+                changes["due"] = self._due(d["due"])
+            if "assignee" in d:
+                changes["assignee"] = str(d["assignee"] or "").strip().lower().lstrip("@")[:64] or None
+            assert changes
+        except Exception:
+            return self._send(400, {"error": "body JSON richiesto: {state?, assignee?, result?, due?, title?, detail?}"})
+        author, human = self._author(who, d)
+        if not author:
+            return self._send(403, {"error": "serve un token personale"})
+        with cond:
+            row = db.execute("SELECT %s FROM tasks WHERE id=?" % ", ".join(TASK_FIELDS), (tid,)).fetchone()
+            if not row:
+                return self._send(404, {"error": "incarico inesistente"})
+            task = dict(zip(TASK_FIELDS, row))
+            moved = "assignee" in changes and changes["assignee"] and changes["assignee"] != task["assignee"]
+            changes["updated"] = time.time()
+            db.execute("UPDATE tasks SET %s WHERE id=?" % ", ".join(f"{k}=?" for k in changes), (*changes.values(), tid))
+            task.update(changes)
+            if moved:
+                if task["state"] in ("done", "cancelled"):
+                    db.execute("UPDATE tasks SET state='todo' WHERE id=?", (tid,))
+                self._hand_out(task, author, human)
+            db.commit()
+            cond.notify_all()
+            out = dict(zip(TASK_FIELDS, db.execute("SELECT %s FROM tasks WHERE id=?" % ", ".join(TASK_FIELDS), (tid,)).fetchone()))
+        self._send(200, out)
+
+    def _save_schedule(self, who, sid):
+        """{text, at: "HH:MM", days?: "12345", room?, enabled?}: new (sid None) or changed.
+        The owner's are written as the owner; an agent's as itself, and it changes only its own."""
+        try:
+            d = self._body()
+            fields = {}
+            if "text" in d or sid is None:
+                fields["text"] = str(d["text"]).strip()[:2000]
+                assert fields["text"]
+            if "at" in d or sid is None:
+                fields["at"] = str(d["at"]).strip()
+                assert TIME.match(fields["at"])
+            if "days" in d:
+                fields["days"] = "".join(sorted({c for c in str(d["days"]) if c in "1234567"})) or "1234567"
+            if "room" in d:
+                fields["room"] = str(d["room"] or "general").strip()[:64]
+            if "enabled" in d:
+                fields["enabled"] = 1 if d["enabled"] else 0
+        except Exception:
+            return self._send(400, {"error": "body JSON richiesto: {text, at: \"HH:MM\", days?: \"12345\", room?, enabled?}"})
+        author, _ = self._author(who, d)
+        if not author:
+            return self._send(403, {"error": "serve un token personale"})
+        with lock:
+            if sid is None:
+                fields.update(created_by=author, created=time.time())
+                cur = db.execute("INSERT INTO schedules(%s) VALUES(%s)" % (", ".join(fields), ",".join("?" * len(fields))),
+                                 tuple(fields.values()))
+                sid = cur.lastrowid
+            else:
+                row = db.execute("SELECT created_by FROM schedules WHERE id=?", (sid,)).fetchone()
+                if not row:
+                    return self._send(404, {"error": "programmata inesistente"})
+                if who["kind"] != "owner" and row[0].split("/")[0] != who["name"]:
+                    return self._send(403, {"error": "puoi cambiare solo le tue"})
+                if fields:
+                    db.execute("UPDATE schedules SET %s WHERE id=?" % ", ".join(f"{k}=?" for k in fields), (*fields.values(), sid))
+            db.commit()
+            out = next((s for s in schedules_list() if s["id"] == sid), None)
+        self._send(201 if out else 404, out or {"error": "not found"})
+
+    def _delete_schedule(self, who, sid):
+        if not str(sid).isdigit():
+            return self._send(400, {"error": "id mancante"})
+        with lock:
+            row = db.execute("SELECT created_by FROM schedules WHERE id=?", (int(sid),)).fetchone()
+            if not row:
+                return self._send(404, {"error": "programmata inesistente"})
+            if who["kind"] != "owner" and row[0].split("/")[0] != who.get("name"):
+                return self._send(403, {"error": "puoi togliere solo le tue"})
+            db.execute("DELETE FROM schedules WHERE id=?", (int(sid),))
+            db.commit()
+        self._send(200, {"deleted": True})
+
     def _set_status(self, who):
         """Cosa fa un agente con un messaggio: in memoria, mai nello storico."""
         if who["kind"] != "agent":
@@ -832,7 +1167,7 @@ class H(BaseHTTPRequestHandler):
             name = str(self._body().get("name", "")).strip().lower()
         except Exception:
             name = ""
-        if not NAME.match(name) or name == OWNER or name in EVERYONE:
+        if not NAME.match(name) or name == OWNER or name in EVERYONE or name == SYSTEM:
             return self._send(400, {"error": "nome: lettere minuscole, cifre, . _ - (max 32), diverso dal tuo"})
         with lock:
             if db.execute("SELECT 1 FROM aliases WHERE alias=?", (name,)).fetchone():
@@ -850,4 +1185,5 @@ class H(BaseHTTPRequestHandler):
 
 
 if __name__ == "__main__":
+    threading.Thread(target=ticker, daemon=True).start()
     ThreadingHTTPServer(("0.0.0.0", int(os.environ.get("PORT", "8000"))), H).serve_forever()

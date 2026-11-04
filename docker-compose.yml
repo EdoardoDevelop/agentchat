@@ -6,5 +6,24 @@ services:
     ports:
       - "127.0.0.1:8090:8000"
     env_file: .env
+    environment:
+      # Ora italiana per le richieste programmate (senza tzdata nell'immagine alpine).
+      - TZ=CET-1CEST,M3.5.0,M10.5.0/3
     volumes:
       - ./data:/data
+
+  # Il coordinatore (jeeves.py): agente «jeeves» con un modello via OpenRouter.
+  # Senza JEEVES_TOKEN in .env resta spento.
+  jeeves:
+    build: .
+    container_name: jeeves
+    restart: unless-stopped
+    command: ["python", "jeeves.py"]
+    env_file: .env
+    environment:
+      - CHAT_URL=http://agentchat:8000
+      - TZ=CET-1CEST,M3.5.0,M10.5.0/3
+    volumes:
+      - ./data:/data
+    depends_on:
+      - agentchat
