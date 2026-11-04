@@ -216,7 +216,19 @@ Regole:
 - Per far fare qualcosa a un agente crea un incarico (create_task): il messaggio con @nome lo manda il server. Nel tuo testo scrivi i nomi degli agenti senza @, così non li svegli due volte."""
 
 
-def ask_model(messages, owner_asked, state):
+# What the page shows while Jeeves works on a message (POST /api/status, as the EasyIslands do).
+STEP = {"who_is_here": "Guarda chi c'è", "read_messages": "Legge la chat", "list_tasks": "Guarda gli incarichi",
+        "create_task": "Crea un incarico", "update_task": "Aggiorna un incarico", "list_schedules": "Guarda le programmate",
+        "create_schedule": "Programma", "update_schedule": "Cambia una programmata", "search_memory": "Cerca nella memoria"}
+
+
+def working(mid, state, detail=""):
+    """Tells the page what Jeeves does with message «mid» (thinking, tools, writing, done…)."""
+    if mid:
+        chat("POST", "/api/status", {"message": mid, "state": state, "detail": detail})
+
+
+def ask_model(messages, owner_asked, state, mid=0):
     """A turn with tools; back the final text (or "")."""
     if not CONF["key"]:
         return ""
@@ -255,6 +267,7 @@ def ask_model(messages, owner_asked, state):
                 args = json.loads(fn.get("arguments") or "{}")
             except ValueError:
                 args = {}
+            working(mid, "tools", STEP.get(fn.get("name"), ""))
             try:
                 result = run_tool(fn.get("name"), args, owner_asked)
             except Exception as e:
@@ -262,6 +275,7 @@ def ask_model(messages, owner_asked, state):
             log("strumento", fn.get("name"), json.dumps(args, ensure_ascii=False)[:200])
             messages.append({"role": "tool", "tool_call_id": c.get("id"),
                              "content": json.dumps(result, ensure_ascii=False)[:12000]})
+        working(mid, "thinking")
     return ""
 
 
@@ -306,7 +320,7 @@ def context(room):
 
 def quiet(text):
     """Agents are named without @: work reaches them through assignments, not through
-    Jeeves' words (an @ would wake them a second time). The owner keeps his."""
+    Jeeves' words (an @ would wake them a second time). The owner's @ stays."""
     return MENTION.sub(lambda m: m.group(0) if m.group(1).lower() == OWNER else m.group(1), text)
 
 
@@ -319,11 +333,16 @@ def turn(trigger, state, extra=""):
                                          "cache_control": {"type": "ephemeral"}}]},
         {"role": "user", "content": context(room) + "\n\n" + (extra or f"Rispondi al messaggio #{trigger['id']}:\n{line(trigger)}")},
     ]
-    text = ask_model(messages, owner_asked, state)
+    mid = trigger.get("id") or 0
+    working(mid, "thinking")
+    text = ask_model(messages, owner_asked, state, mid)
     if not text or text.strip().upper().rstrip(".") == "NIENTE":
+        working(mid, "failed" if state.get("error") else "silent")
         return None
+    working(mid, "writing")
     thread = trigger.get("thread") or (trigger["id"] if trigger.get("sender") == "sistema" else None)
     post(quiet(text)[:8000], room, thread)
+    working(mid, "done")
     return text
 
 

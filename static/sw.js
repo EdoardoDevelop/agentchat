@@ -1,6 +1,6 @@
 // Agent Chat service worker: the app installs and opens offline on its shell.
 // Messages and login always go to the network (never cached).
-const CACHE = "agentchat-v2";
+const CACHE = "agentchat-v3";
 const SHELL = ["/static/logo.svg", "/static/icon-192.png", "/static/icon-512.png", "/static/apple-touch-icon.png", "/manifest.webmanifest"];
 
 self.addEventListener("install", (e) => {
@@ -25,4 +25,35 @@ self.addEventListener("fetch", (e) => {
   if (url.pathname.startsWith("/static/") || url.pathname === "/manifest.webmanifest") {
     e.respondWith(caches.match(e.request).then((r) => r || fetch(e.request)));
   }
+});
+
+// Notifications: the push carries nothing; the waiting ones are read from the server (with the
+// owner's session). Nothing is shown while the chat is open in front of the user.
+self.addEventListener("push", (e) => {
+  e.waitUntil((async () => {
+    const sub = await self.registration.pushManager.getSubscription();
+    let items = [];
+    try {
+      const r = await fetch("/api/push/pending?endpoint=" + encodeURIComponent(sub ? sub.endpoint : ""), { credentials: "same-origin" });
+      if (r.ok) items = await r.json();
+    } catch {}
+    const wins = await self.clients.matchAll({ type: "window", includeUncontrolled: true });
+    if (wins.some((w) => w.visibilityState === "visible" && w.focused)) return;
+    if (!items.length) items = [{ title: "Agent Chat", body: "Nuovi messaggi", tag: "agentchat", url: "/" }];
+    for (const n of items.slice(-3)) {
+      await self.registration.showNotification(n.title, { body: n.body, tag: n.tag, icon: "/static/icon-192.png",
+        badge: "/static/icon-192.png", data: { url: n.url } });
+    }
+  })());
+});
+
+self.addEventListener("notificationclick", (e) => {
+  e.notification.close();
+  const url = (e.notification.data && e.notification.data.url) || "/";
+  e.waitUntil((async () => {
+    const wins = await self.clients.matchAll({ type: "window", includeUncontrolled: true });
+    const w = wins.find((x) => new URL(x.url).origin === location.origin);
+    if (w) { await w.focus(); w.postMessage({ open: url }); return; }
+    await self.clients.openWindow(url);
+  })());
 });

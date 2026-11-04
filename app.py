@@ -33,6 +33,7 @@ scollega senza rispondere torna libero dopo 3 minuti, con un messaggio di «sist
 coordinatore (jeeves.py, un agente con un modello via OpenRouter).
 """
 import hashlib, hmac, json, os, re, secrets, sqlite3, threading, time
+import push
 from urllib.parse import quote, unquote
 import urllib.error, urllib.request
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
@@ -184,6 +185,12 @@ db.execute("""CREATE TABLE IF NOT EXISTS schedules(
 db.execute("CREATE TABLE IF NOT EXISTS released(message INTEGER PRIMARY KEY, by TEXT NOT NULL, ts REAL NOT NULL)")
 # The server's own settings, changed from the page (the coordinator's model and key…).
 db.execute("CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY, value TEXT NOT NULL)")
+# Notifications: the owner's devices (Web Push) and what each one still has to show.
+db.execute("""CREATE TABLE IF NOT EXISTS push_subs(
+  endpoint TEXT PRIMARY KEY, mode TEXT NOT NULL DEFAULT 'mentions', created REAL NOT NULL, agent TEXT)""")
+db.execute("""CREATE TABLE IF NOT EXISTS push_queue(
+  id INTEGER PRIMARY KEY AUTOINCREMENT, endpoint TEXT NOT NULL, title TEXT NOT NULL, body TEXT NOT NULL,
+  tag TEXT NOT NULL, url TEXT NOT NULL, ts REAL NOT NULL)""")
 db.commit()
 lock = threading.Lock()
 cond = threading.Condition(lock)
@@ -455,6 +462,67 @@ def models_list():
     return out
 
 
+# ── Notifications ────────────────────────────────────────────────────────────
+# The owner's devices get a push for the agents' messages: those that name the owner
+# («mentions», the default: questions, permissions, reports) or all of them («all»).
+# The push carries nothing; the device reads the text from /api/push/pending.
+
+def vapid():
+    """The server's VAPID keys, made once and kept in settings."""
+    d, pub = setting("push_private"), setting("push_public")
+    if not d:
+        d, pub = push.new_keys()
+        for k, v in (("push_private", d), ("push_public", pub)):
+            db.execute("INSERT INTO settings(key, value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", (k, v))
+        db.commit()
+    return d, pub
+
+
+def names_owner(text):
+    """Does the text call the owner (@owner)?"""
+    return re.search(r"@" + re.escape(OWNER) + r"(?![\w.\-/])", text or "", re.I) is not None
+
+
+def notify(mid, sender, text, human):
+    """Queues the message for the owner's devices that want it and wakes them (in a thread)."""
+    if human or sender == SYSTEM:
+        return
+    called = names_owner(text)
+    with lock:
+        alias = {h: a for a, h in aliases().items()}
+        subs = [e for e, mode in db.execute("SELECT endpoint, mode FROM push_subs").fetchall() if mode == "all" or called]
+        if not subs:
+            return
+        title = ("📣 " if called else "") + (alias.get(sender) or sender)
+        body = (text or "📎 allegato").strip().replace("\n", " ")[:180]
+        for e in subs:
+            db.execute("INSERT INTO push_queue(endpoint, title, body, tag, url, ts) VALUES(?,?,?,?,?,?)",
+                       (e, title, body, f"m{mid}", f"/#m{mid}", time.time()))
+            # At most 20 waiting per device.
+            db.execute("DELETE FROM push_queue WHERE endpoint=? AND id NOT IN (SELECT id FROM push_queue WHERE endpoint=? "
+                       "ORDER BY id DESC LIMIT 20)", (e, e))
+        db.commit()
+        d, pub = vapid()
+        subject = setting("push_subject") or "mailto:agentchat@localhost"
+    threading.Thread(target=wake, args=(subs, d, pub, subject), daemon=True).start()
+
+
+def wake(endpoints, d, pub, subject):
+    for e in endpoints:
+        try:
+            code = push.send(e, d, pub, subject)
+        except Exception as err:
+            print("push:", err, flush=True)
+            continue
+        if code in (404, 410):   # the device unsubscribed
+            with lock:
+                db.execute("DELETE FROM push_subs WHERE endpoint=?", (e,))
+                db.execute("DELETE FROM push_queue WHERE endpoint=?", (e,))
+                db.commit()
+        elif code >= 300:
+            print("push:", code, urlparse(e).hostname, flush=True)
+
+
 def ticker():
     """Every 20 s: scheduled requests and claims let go."""
     while True:
@@ -607,6 +675,23 @@ class H(BaseHTTPRequestHandler):
                 out = coord_config(with_key=mine)
             out["status"] = coord_status
             return self._send(200, out)
+        if u.path == "/api/push":
+            if not self._page_owner(who):
+                return self._send(403, {"error": "solo dalla pagina web"})
+            with lock:
+                _, pub = vapid()
+                row = db.execute("SELECT mode FROM push_subs WHERE endpoint=?", (q.get("endpoint", [""])[0],)).fetchone()
+                n = db.execute("SELECT COUNT(*) FROM push_subs").fetchone()[0]
+            return self._send(200, {"key": pub, "mode": row[0] if row else None, "devices": n})
+        if u.path == "/api/push/pending":
+            if who["kind"] != "owner":
+                return self._send(403, {"error": "solo l'owner"})
+            e = q.get("endpoint", [""])[0]
+            with lock:
+                rows = db.execute("SELECT id, title, body, tag, url, ts FROM push_queue WHERE endpoint=? ORDER BY id", (e,)).fetchall()
+                db.execute("DELETE FROM push_queue WHERE endpoint=?", (e,))
+                db.commit()
+            return self._send(200, [dict(zip(("id", "title", "body", "tag", "url", "ts"), r)) for r in rows])
         if u.path == "/api/coordinator/models":
             if not self._page_owner(who):
                 return self._send(403, {"error": "solo dalla pagina web"})
@@ -700,6 +785,8 @@ class H(BaseHTTPRequestHandler):
             return self._set_status(who)
         if u.path == "/api/aliases":
             return self._set_aliases(who)
+        if u.path in ("/api/push/subscribe", "/api/push/unsubscribe", "/api/push/test"):
+            return self._push(who, u.path.rsplit("/", 1)[1])
         if u.path == "/api/coordinator":
             return self._set_coordinator(who)
         if u.path == "/api/coordinator/test":
@@ -800,6 +887,7 @@ class H(BaseHTTPRequestHandler):
                 task_progress(thread, sender, text)
             db.commit()
             cond.notify_all()
+        notify(cur.lastrowid, sender, text, human)
         self._send(201, {"id": cur.lastrowid, "room": room, "sender": sender, "text": text, "ts": ts,
                          "verified": bool(verified), "thread": thread, "kind": kind, "files": files, "human": bool(human)})
 
@@ -1040,6 +1128,51 @@ class H(BaseHTTPRequestHandler):
         self.send_header("Cache-Control", "private, max-age=86400")
         self.end_headers()
         self.wfile.write(body)
+
+    # Notifications
+
+    def _push(self, who, action):
+        """subscribe {endpoint, mode}, unsubscribe {endpoint}, test {endpoint}: this device."""
+        if not self._page_owner(who):
+            return self._send(403, {"error": "solo dalla pagina web"})
+        try:
+            d = self._body()
+            endpoint = str(d.get("endpoint") or "")[:1000]
+            mode = d.get("mode") or "mentions"
+            assert endpoint and mode in ("mentions", "all")
+        except Exception:
+            return self._send(400, {"error": "body JSON richiesto: {endpoint, mode?}"})
+        if action == "unsubscribe":
+            with lock:
+                db.execute("DELETE FROM push_subs WHERE endpoint=?", (endpoint,))
+                db.execute("DELETE FROM push_queue WHERE endpoint=?", (endpoint,))
+                db.commit()
+            return self._send(200, {"ok": True})
+        if not push.allowed(endpoint):
+            return self._send(400, {"error": "servizio di notifiche non riconosciuto"})
+        with lock:
+            if action == "subscribe":
+                db.execute("INSERT INTO push_subs(endpoint, mode, created) VALUES(?,?,?) ON CONFLICT(endpoint) DO UPDATE SET mode=excluded.mode",
+                           (endpoint, mode, time.time()))
+                # Who signs the pushes: the address of this page (Apple wants a real one).
+                host = (self.headers.get("Host") or "").strip()
+                if host and re.match(r"^[A-Za-z0-9.\-]+(:\d+)?$", host):
+                    db.execute("INSERT INTO settings(key, value) VALUES('push_subject', ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                               (f"https://{host}",))
+                db.commit()
+                return self._send(200, {"ok": True, "mode": mode})
+            if not db.execute("SELECT 1 FROM push_subs WHERE endpoint=?", (endpoint,)).fetchone():
+                return self._send(404, {"error": "questo dispositivo non riceve notifiche"})
+            db.execute("INSERT INTO push_queue(endpoint, title, body, tag, url, ts) VALUES(?,?,?,?,?,?)",
+                       (endpoint, "Agent Chat", "Le notifiche funzionano ✓", "prova", "/", time.time()))
+            db.commit()
+            d_, pub = vapid()
+            subject = setting("push_subject") or "mailto:agentchat@localhost"
+        try:
+            code = push.send(endpoint, d_, pub, subject)
+        except Exception as e:
+            return self._send(200, {"ok": False, "error": f"il servizio di notifiche non risponde: {e}"})
+        self._send(200, {"ok": code < 300, "status": code, **({} if code < 300 else {"error": f"il servizio di notifiche ha risposto {code}"})})
 
     # The coordinator
 

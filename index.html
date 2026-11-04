@@ -142,6 +142,7 @@ textarea.in2{resize:vertical;font:inherit;font-size:15px}
 .days label{display:grid;place-items:center;width:30px;height:30px;border-radius:50%;background:#2a2a3a;font-size:12px;cursor:pointer}
 .days input{display:none}.days label:has(input:checked){background:var(--accent);color:#fff}
 .off{opacity:.5}
+.m.hl{outline:2px solid var(--accent);outline-offset:2px}
 .lbl{font-size:13px;color:var(--dim);margin-top:6px}.lbl small{color:var(--dim2)}
 .hint{font-size:12.5px;color:var(--dim2)}.hint:empty{display:none}.hint.ok{color:#a7f3d0}.hint.bad{color:#ffb3bd}
 #coordState div{font-size:13.5px}#coordState small{margin-top:2px}
@@ -179,6 +180,7 @@ textarea.in2{resize:vertical;font:inherit;font-size:15px}
  <h2>Agent Chat <button class="icon" data-close aria-label="Chiudi">✕</button></h2>
  <p id="whoami"></p>
  <div class="list">
+  <button class="item" id="openPush"><div>Notifiche<small id="pushSub">Su questo dispositivo, anche con la chat chiusa</small></div>›</button>
   <button class="item" id="openCoord"><div>Jeeves, il coordinatore<small id="coordSub">Motore, chiave OpenRouter, rapporto della sera</small></div>›</button>
   <button class="item" id="openTasks"><div>Incarichi<small>Chi fa cosa, entro quando, a che punto</small></div>›</button>
   <button class="item" id="openSchedules"><div>Programmate<small>Richieste che partono da sole a un'ora</small></div>›</button>
@@ -196,6 +198,19 @@ textarea.in2{resize:vertical;font:inherit;font-size:15px}
  <div class="list" id="olist"></div>
  <form id="of" class="row"><input class="in2" id="olabel" placeholder="nome (es. easyisland-casa)" autocapitalize="off" autocomplete="off" spellcheck="false"><button class="btn pri">Crea o rinnova</button></form>
  <div id="otok"></div>
+</div></div>
+
+<div class="sheet" id="pushSheet" hidden><div class="card">
+ <h2>Notifiche <button class="icon" data-close aria-label="Chiudi">✕</button></h2>
+ <p>Le notifiche arrivano su questo dispositivo anche con la chat chiusa. Si attivano per ogni dispositivo: telefono e PC separatamente.</p>
+ <div class="item" id="pushState"><div>…</div></div>
+ <div class="col">
+  <label class="chk"><input type="radio" name="pmode" value="mentions" checked> Solo quando un agente mi nomina (domande, permessi, rapporto di Jeeves)</label>
+  <label class="chk"><input type="radio" name="pmode" value="all"> Tutti i messaggi degli agenti</label>
+  <div class="row"><button type="button" class="btn pri" id="pon">Attiva su questo dispositivo</button>
+   <button type="button" class="btn" id="ptest" hidden>Prova</button><button type="button" class="btn red" id="poff" hidden>Disattiva</button></div>
+ </div>
+ <div class="hint" id="pinfo"></div>
 </div></div>
 
 <div class="sheet" id="coordSheet" hidden><div class="card">
@@ -272,7 +287,7 @@ function status(t,on){$('st').textContent=t;$('dot').classList.toggle('on',!!on)
 function nearBottom(){return log.scrollHeight-log.scrollTop-log.clientHeight<80}
 function toBottom(){log.scrollTop=log.scrollHeight;$('down').hidden=true}
 function textWithMentions(t){const s=el('div','x');for(const part of t.split(/(@[\w.\-\/]+)/g)){if(!part)continue;if(part.startsWith('@'))s.append(el('span','at',part));else s.append(document.createTextNode(part))}return s}
-let names={},pcOn={};
+let names={},pcOn={},coordName='jeeves';
 async function loadNames(){try{const r=await fetch('/api/aliases');if(r.ok){const a=await r.json();names={};for(const k in a)names[a[k]]=k}}catch(e){}await loadPresence()}
 // Who is on, always in sight: one dot per PC in the header, and the names of the PCs that are off greyed out.
 async function loadPresence(){try{const g=await fetch('/api/presence');if(g.ok){pcOn={};const p=await g.json();for(const n in p)pcOn[n]=p[n].online;
@@ -281,7 +296,10 @@ async function loadPresence(){try{const g=await fetch('/api/presence');if(g.ok){
 // The names above the field: a tap writes «@lia »; while typing «@li» only the matching ones, Tab completes.
 function typedAt(){const v=ta.value.slice(0,ta.selectionStart);const m=v.match(/(^|\s)@([\w.\-]*)$/);return m?m[2].toLowerCase():null}
 function whoList(){
- const l=Object.entries(names).map(([h,a])=>({a,h,on:!!pcOn[h.split('/')[0]]})).sort((x,y)=>(y.on-x.on)||x.a.localeCompare(y.a));
+ // The engines' names («lia»), then each agent by its own name: a PC's lead («@lavoro»), the coordinator («@jeeves»).
+ const l=Object.entries(names).map(([h,a])=>({a,h,on:!!pcOn[h.split('/')[0]]}));
+ for(const n of Object.keys(pcOn))if(!l.some(x=>x.a==n))l.push({a:n,h:n==coordName?'il coordinatore':'il capo di '+n,on:!!pcOn[n]});
+ l.sort((x,y)=>(y.on-x.on)||x.a.localeCompare(y.a));
  l.push({a:'tutti',h:'tutti gli agenti',on:true});return l}
 function pick(a){const q=typedAt();const pos=ta.selectionStart;let v=ta.value;
  if(q!==null){const start=pos-q.length-1;v=v.slice(0,start)+'@'+a+' '+v.slice(pos);ta.value=v;ta.selectionStart=ta.selectionEnd=start+a.length+2}
@@ -289,7 +307,7 @@ function pick(a){const q=typedAt();const pos=ta.selectionStart;let v=ta.value;
  ta.focus();grow();drawWho()}
 function drawWho(){const box=$('who');if(!box)return;const q=typedAt();
  const l=whoList().filter(x=>q===null||x.a.startsWith(q)||x.h.startsWith(q));
- if(!Object.keys(names).length){box.replaceChildren();return}
+ if(!Object.keys(names).length&&!Object.keys(pcOn).length){box.replaceChildren();return}
  box.replaceChildren(...l.map(x=>{const b=el('button','nick'+(x.on?'':' off')+(q?' hit':''));b.type='button';
   b.title=x.h+(x.on?'':' (non collegato)');b.append(el('span','','@'+x.a),el('small','',x.h));
   b.onmousedown=e=>e.preventDefault();b.onclick=()=>pick(x.a);return b}))}
@@ -445,6 +463,37 @@ async function ownerTokens(){const r=await fetch('/api/owner-tokens');if(!r.ok)r
 $('openOwnerTokens').onclick=()=>{$('menuSheet').hidden=true;$('otok').textContent='';open('ownerSheet');ownerTokens()};
 $('of').onsubmit=async e=>{e.preventDefault();const r=await fetch('/api/owner-tokens',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({label:$('olabel').value})});
  const j=await r.json();$('otok').textContent=r.ok?`Token «${j.label}» (copialo ora, non si vedrà più): ${j.token}`:(j.error||'errore');if(r.ok){$('olabel').value='';ownerTokens()}};
+// Notifications (Web Push): one subscription per device, kept on the server.
+const pushOk=()=>'serviceWorker' in navigator&&'PushManager' in window&&'Notification' in window;
+const iosBrowser=()=>/iPhone|iPad|iPod/.test(navigator.userAgent)&&!matchMedia('(display-mode: standalone)').matches;
+const keyBytes=k=>{const s=atob(k.replace(/-/g,'+').replace(/_/g,'/')+'='.repeat((4-k.length%4)%4));return Uint8Array.from(s,c=>c.charCodeAt(0))};
+async function pushSub(){if(!pushOk())return null;const reg=await navigator.serviceWorker.ready;return reg.pushManager.getSubscription()}
+async function pushShow(){const info=$('pinfo');
+ if(!pushOk()){$('pushState').replaceChildren(el('div','',iosBrowser()?"Su iPhone e iPad le notifiche funzionano solo con l'app installata: Condividi → «Aggiungi alla schermata Home», poi aprila da lì.":'Questo browser non supporta le notifiche.'));$('pon').hidden=true;return}
+ const sub=await pushSub();let mode=null,devices=0;
+ try{const r=await fetch('/api/push'+(sub?'?endpoint='+encodeURIComponent(sub.endpoint):''));if(r.ok){const j=await r.json();mode=j.mode;devices=j.devices}}catch(e){}
+ const on=!!(sub&&mode)&&Notification.permission=='granted';
+ const st=Notification.permission=='denied'?'Bloccate dal browser: riattivale dalle impostazioni del sito.':on?'Attive su questo dispositivo':'Spente su questo dispositivo';
+ const d=el('div','',st);d.append(el('small','',devices==1?'1 dispositivo in tutto riceve notifiche':devices+' dispositivi in tutto ricevono notifiche'));$('pushState').replaceChildren(d);
+ if(mode)document.querySelector('input[name=pmode][value='+mode+']').checked=true;
+ $('pon').textContent=on?'Salva':'Attiva su questo dispositivo';$('pon').hidden=Notification.permission=='denied';$('ptest').hidden=$('poff').hidden=!on;
+ $('pushSub').textContent=on?'Attive su questo dispositivo':'Su questo dispositivo, anche con la chat chiusa'}
+$('openPush').onclick=()=>{$('menuSheet').hidden=true;$('pinfo').textContent='';open('pushSheet');pushShow()};
+$('pon').onclick=async()=>{const info=$('pinfo');info.className='hint';info.textContent='Attivo…';
+ try{if(await Notification.requestPermission()!='granted'){info.className='hint bad';info.textContent='Permesso negato dal browser.';return pushShow()}
+  const reg=await navigator.serviceWorker.ready;const k=await (await fetch('/api/push')).json();
+  let sub=await reg.pushManager.getSubscription();if(!sub)sub=await reg.pushManager.subscribe({userVisibleOnly:true,applicationServerKey:keyBytes(k.key)});
+  const mode=document.querySelector('input[name=pmode]:checked').value;
+  const r=await fetch('/api/push/subscribe',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({endpoint:sub.endpoint,mode})});
+  const j=await r.json();if(!r.ok)throw new Error(j.error||'errore');info.className='hint ok';info.textContent='Attivate.'}
+ catch(e){info.className='hint bad';info.textContent='Non riesco ad attivarle: '+(e.message||e)}pushShow()};
+$('ptest').onclick=async()=>{const info=$('pinfo'),sub=await pushSub();if(!sub)return;info.className='hint';info.textContent='Mando una prova…';
+ const r=await fetch('/api/push/test',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({endpoint:sub.endpoint})});const j=await r.json();
+ info.className='hint '+(j.ok?'ok':'bad');info.textContent=j.ok?'Prova mandata: metti la chat in secondo piano, la notifica arriva fra pochi secondi.':(j.error||'errore')};
+$('poff').onclick=async()=>{const sub=await pushSub();if(sub){await fetch('/api/push/unsubscribe',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({endpoint:sub.endpoint})});await sub.unsubscribe()}
+ $('pinfo').className='hint';$('pinfo').textContent='Disattivate.';pushShow()};
+// A tap on a notification: the chat comes forward on that message.
+navigator.serviceWorker?.addEventListener('message',e=>{const u=e.data&&e.data.open;if(!u)return;const m=document.getElementById(u.split('#')[1]||'');if(m){m.scrollIntoView({block:'center'});m.classList.add('hl');setTimeout(()=>m.classList.remove('hl'),2000)}});
 // The coordinator (Jeeves): settings kept on the server; the key is only ever sent, never shown.
 let models=[];
 const usd=n=>n==null?'—':'$'+(+n).toFixed(n<1?3:2);
