@@ -29,6 +29,8 @@ button{padding:13px;border-radius:14px;border:0;background:#8B5CF6;color:#fff;fo
  <form method="post" action="/login"><input name="password" type="password" placeholder="Password" autocomplete="current-password" autofocus required><button>Entra</button></form>
  <div id="e"></div>
 </main>
-<script>if(location.search.includes('err'))document.getElementById('e').textContent='Password errata';
+<script>const q=new URLSearchParams(location.search),w=q.get('wait');
+if(w)document.getElementById('e').textContent='Troppi tentativi: riprova tra '+(+w||15)+' minuti';
+else if(q.has('err'))document.getElementById('e').textContent='Password errata';
 if('serviceWorker' in navigator)navigator.serviceWorker.register('/sw.js').catch(()=>{});</script>
 </body></html>

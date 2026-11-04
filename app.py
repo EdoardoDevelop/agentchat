@@ -62,6 +62,43 @@ for _alias, _f in (("/sw.js", "/static/sw.js"), ("/manifest.webmanifest", "/stat
         STATIC[_alias] = STATIC[_f]
 
 
+# Wrong passwords: an address that misses LOGIN_TRIES times in LOGIN_WINDOW seconds
+# waits until the window passes; all addresses together at most LOGIN_ALL (spread
+# attempts). The 2 s wait alone did not slow attempts sent in parallel.
+LOGIN_TRIES = 5
+LOGIN_ALL = 30
+LOGIN_WINDOW = 15 * 60
+_misses = {}          # address -> times of the wrong passwords
+_misses_lock = threading.Lock()
+
+
+def _recent(times, now):
+    return [t for t in times if now - t < LOGIN_WINDOW]
+
+
+def login_wait(addr):
+    """Seconds this address must still wait before trying again (0 = may try)."""
+    now = time.time()
+    with _misses_lock:
+        for a in list(_misses):
+            _misses[a] = _recent(_misses[a], now)
+            if not _misses[a]:
+                del _misses[a]
+        mine = _misses.get(addr, [])
+        every = sorted(t for ts in _misses.values() for t in ts)
+        waits = []
+        if len(mine) >= LOGIN_TRIES:
+            waits.append(mine[-LOGIN_TRIES] + LOGIN_WINDOW - now)
+        if len(every) >= LOGIN_ALL:
+            waits.append(every[-LOGIN_ALL] + LOGIN_WINDOW - now)
+        return max([0] + [int(w) + 1 for w in waits])
+
+
+def login_missed(addr):
+    with _misses_lock:
+        _misses.setdefault(addr, []).append(time.time())
+
+
 def sign(exp):
     return hmac.new(SECRET, str(exp).encode(), hashlib.sha256).hexdigest()
 
@@ -247,6 +284,16 @@ class H(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def _client(self):
+        """The visitor's address. Behind nginx (the container listens on 127.0.0.1
+        only) it is the last X-Forwarded-For entry, the one nginx added itself:
+        the ones before it come from the visitor and can be made up."""
+        peer = self.client_address[0]
+        fwd = self.headers.get("X-Forwarded-For", "")
+        if fwd and (peer.startswith("127.") or peer == "::1" or peer.startswith("172.") or peer.startswith("10.") or peer.startswith("192.168.")):
+            return fwd.split(",")[-1].strip() or peer
+        return peer
+
     def _redirect(self, to, cookie=None):
         self.send_response(303)
         self.send_header("Location", to)
@@ -391,7 +438,13 @@ class H(BaseHTTPRequestHandler):
         if u.path == "/login":
             n = int(self.headers.get("Content-Length", 0) or 0)
             pw = parse_qs(self.rfile.read(min(n, 10_000)).decode(errors="replace")).get("password", [""])[0]
+            addr = self._client()
+            wait = login_wait(addr)
+            if wait:
+                # Not even checked: a right password does not get through either.
+                return self._redirect(f"/?wait={(wait + 59) // 60}")
             if not hmac.compare_digest(pw.encode(), PASSWORD.encode()):
+                login_missed(addr)
                 time.sleep(2)  # rallenta i tentativi a forza bruta
                 return self._redirect("/?err=1")
             exp = int(time.time()) + SESSION_DAYS * 86400
