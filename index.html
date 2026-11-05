@@ -489,7 +489,7 @@ $('pon').onclick=async()=>{const info=$('pinfo');info.className='hint';info.text
  catch(e){info.className='hint bad';info.textContent='Non riesco ad attivarle: '+(e.message||e)}pushShow()};
 $('ptest').onclick=async()=>{const info=$('pinfo'),sub=await pushSub();if(!sub)return;info.className='hint';info.textContent='Mando una prova…';
  const r=await fetch('/api/push/test',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({endpoint:sub.endpoint})});const j=await r.json();
- info.className='hint '+(j.ok?'ok':'bad');info.textContent=j.ok?'Prova mandata: metti la chat in secondo piano, la notifica arriva fra pochi secondi.':(j.error||'errore')};
+ info.className='hint '+(j.ok?'ok':'bad');info.textContent=j.ok?'Prova mandata: la notifica arriva fra pochi secondi. Se non la vedi, controlla le notifiche di Windows o del telefono per il browser.':(j.error||'errore')};
 $('poff').onclick=async()=>{const sub=await pushSub();if(sub){await fetch('/api/push/unsubscribe',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({endpoint:sub.endpoint})});await sub.unsubscribe()}
  $('pinfo').className='hint';$('pinfo').textContent='Disattivate.';pushShow()};
 // A tap on a notification: the chat comes forward on that message.

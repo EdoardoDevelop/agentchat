@@ -1,6 +1,6 @@
 // Agent Chat service worker: the app installs and opens offline on its shell.
 // Messages and login always go to the network (never cached).
-const CACHE = "agentchat-v3";
+const CACHE = "agentchat-v4";
 const SHELL = ["/static/logo.svg", "/static/icon-192.png", "/static/icon-512.png", "/static/apple-touch-icon.png", "/manifest.webmanifest"];
 
 self.addEventListener("install", (e) => {
@@ -38,7 +38,10 @@ self.addEventListener("push", (e) => {
       if (r.ok) items = await r.json();
     } catch {}
     const wins = await self.clients.matchAll({ type: "window", includeUncontrolled: true });
-    if (wins.some((w) => w.visibilityState === "visible" && w.focused)) return;
+    // The test (Prova) is always shown: it is pressed with the chat in front of the user.
+    const watching = wins.some((w) => w.visibilityState === "visible" && w.focused);
+    if (watching) items = items.filter((n) => n.tag === "prova");
+    if (watching && !items.length) return;
     if (!items.length) items = [{ title: "Agent Chat", body: "Nuovi messaggi", tag: "agentchat", url: "/" }];
     for (const n of items.slice(-3)) {
       await self.registration.showNotification(n.title, { body: n.body, tag: n.tag, icon: "/static/icon-192.png",
